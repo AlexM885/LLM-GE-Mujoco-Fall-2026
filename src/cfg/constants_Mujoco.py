@@ -208,6 +208,28 @@ hof_size = 100
 max_gen_attempts = 5
 migration_gen = 5
 """
+MAP-Elites Constants
+"""
+#: Use MAP-Elites (illumination over a behaviour grid) instead of NSGA-II
+#: selection. When False, run_improved.py keeps its original elitist loop.
+USE_MAP_ELITES = True
+#: Number of bins per behaviour dimension; the archive is MAP_BINS ** 2 cells.
+MAP_BINS = 20
+#: Behaviour descriptors, as (metric name, min, max). The metric names must
+#: match columns written by sota/MujocoRL/train_rl.py. Edit this list to
+#: re-dimension the archive - get_bin() adapts to however many entries it has.
+MAP_ELITES_DESCRIPTORS = [
+    ("mean_distance", -500.0, 2000.0),   # reasonable for HalfCheetah
+    ("mean_control_cost", 0.0, 10.0),
+]
+#: Results column that ranks occupants competing for the same cell (maximised).
+MAP_ELITES_OBJECTIVE = "mean_reward"
+#: Sentinel reward that sota/MujocoRL/train_rl.py writes when a generated model
+#: cannot be built, trained or evaluated. Genes at or below it never enter the
+#: archive, so a broken model cannot occupy a niche or be drawn as a parent.
+FAILED_EVAL_SENTINEL = -999999.0
+
+"""
 Misc. Non-sense
 """
 DNA_TXT = """

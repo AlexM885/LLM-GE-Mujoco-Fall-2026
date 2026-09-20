@@ -47,9 +47,13 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000):
         Standard deviation of total rewards.
     rewards : list[float]
         Per-episode total rewards.
+    metrics : dict
+        Behaviour metrics used as MAP-Elites descriptors: ``mean_distance``
+        and ``mean_control_cost``, plus their per-episode series.
     """
     rewards = []
     distances = []
+    control_costs = []
     for ep in range(num_episodes):
         obs, reset_info = env.reset()
         done = False
@@ -57,6 +61,7 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000):
         step_count = 0
         start_x = _get_x_position(env, reset_info)
         end_x = start_x
+        ep_ctrl_cost = 0.0
         while not done and step_count < max_steps:
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
@@ -66,19 +71,26 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000):
             current_x = _get_x_position(env, info)
             if current_x is not None:
                 end_x = current_x
+            if isinstance(info, dict) and info.get("reward_ctrl") is not None:
+                # HalfCheetah typically reports reward_ctrl as a negative penalty.
+                ep_ctrl_cost += float(-info["reward_ctrl"])
         distance = float(end_x - start_x) if (start_x is not None and end_x is not None) else 0.0
+        mean_ctrl_cost = ep_ctrl_cost / max(step_count, 1)
         rewards.append(total_reward)
         distances.append(distance)
+        control_costs.append(mean_ctrl_cost)
         print(
             f"  Episode {ep+1:2d}: reward = {total_reward:8.2f}  "
-            f"distance = {distance:8.2f}  steps = {step_count}"
+            f"distance = {distance:8.2f}  ctrl_cost = {mean_ctrl_cost:8.4f}  steps = {step_count}"
         )
 
     mean_reward = float(np.mean(rewards))
     std_reward = float(np.std(rewards))
     metrics = {
         "mean_distance": float(np.mean(distances)) if distances else 0.0,
+        "mean_control_cost": float(np.mean(control_costs)) if control_costs else 0.0,
         "distances": distances,
+        "control_costs": control_costs,
     }
     return mean_reward, std_reward, rewards, metrics
 
@@ -116,6 +128,7 @@ def main():
     print(f"  Mean reward:    {mean_reward:8.2f}")
     print(f"  Std reward:     {std_reward:8.2f}")
     print(f"  Mean distance:  {metrics['mean_distance']:8.2f}")
+    print(f"  Mean ctrl cost: {metrics['mean_control_cost']:8.4f}")
     print(f"  Min reward:     {min(rewards):8.2f}")
     print(f"  Max reward:     {max(rewards):8.2f}")
     print(f"{'='*50}\n")

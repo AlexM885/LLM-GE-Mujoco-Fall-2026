@@ -34,9 +34,12 @@ class Individual:
         return self.rank < other.rank
 
 class Island:
-    def __init__(self, path: str, individuals: list[Individual]):
+    def __init__(self, path: str, individuals: list[Individual], map_elites_archive: dict = None):
         self.path = path
         self.individuals = individuals
+        # Carried through migration untouched so a MAP-Elites run does not lose
+        # its behaviour grid every time the islands are repacked.
+        self.map_elites_archive = map_elites_archive if map_elites_archive is not None else {}
         heapq.heapify(self.individuals)
     
     def remove_best(self) -> Individual:

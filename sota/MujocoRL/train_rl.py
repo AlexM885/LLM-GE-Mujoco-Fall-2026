@@ -17,8 +17,8 @@ def write_failure_results(gene_id, start_time, message, stats_dir=None):
     results_dir = os.path.join(script_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, f"{gene_id}_results.csv"), "w") as f:
-        f.write("mean_reward,std_reward,train_time,param_count\n")
-        f.write(f"-999999.0,0.0,{train_time},999999999")
+        f.write("mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost\n")
+        f.write(f"-999999.0,0.0,{train_time},999999999,0.0,0.0")
 
     if stats_dir:
         os.makedirs(stats_dir, exist_ok=True)
@@ -114,13 +114,22 @@ def main(
         return
     train_time = time.time() - start_time
 
+    # MAP-Elites behaviour descriptors (see src/cfg/constants_Mujoco.py).
+    mean_distance = float(metrics.get("mean_distance", 0.0))
+    mean_control_cost = float(metrics.get("mean_control_cost", 0.0))
+
     # Save results under the SOTA_ROOT/results directory (where run_improved.py expects them)
     script_dir = os.path.dirname(os.path.abspath(__file__))
     results_dir = os.path.join(script_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, f"{gene_id}_results.csv"), "w") as f:
-        f.write("mean_reward,std_reward,train_time,param_count\n")
-        f.write(f"{mean_reward},{std_reward},{train_time},{param_count}")
+        f.write(
+            "mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost\n"
+        )
+        f.write(
+            f"{mean_reward},{std_reward},{train_time},{param_count},"
+            f"{mean_distance},{mean_control_cost}"
+        )
 
     os.makedirs(stats_dir, exist_ok=True)
     stats_path = os.path.join(stats_dir, f"{gene_id}_stats.json")
@@ -135,8 +144,12 @@ def main(
                 "mean_reward": mean_reward,
                 "std_reward": std_reward,
                 "param_count": param_count,
+                "mean_distance": mean_distance,
+                "mean_control_cost": mean_control_cost,
                 "model_path": model_path,
                 "rewards": rewards,
+                "distances": metrics.get("distances", []),
+                "control_costs": metrics.get("control_costs", []),
             },
             f,
             indent=2,
@@ -144,7 +157,9 @@ def main(
 
     print(
         "Mean reward: "
-        f"{mean_reward}, Std: {std_reward}, Params: {param_count}, Time: {train_time:.1f}s"
+        f"{mean_reward}, Std: {std_reward}, Params: {param_count}, "
+        f"Distance: {mean_distance}, CtrlCost: {mean_control_cost}, "
+        f"Time: {train_time:.1f}s"
     )
     print(f"Saved model: {model_path}")
     print(f"Saved stats: {stats_path}")

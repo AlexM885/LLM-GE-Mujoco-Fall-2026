@@ -32,6 +32,14 @@ if not AVAILABLE_LLM_MODELS and globals().get("LLM_MODEL"):
 
 LLM_SERVER_READY = False
 
+# MAP-Elites settings. Only the Mujoco constants define these, so fall back to
+# a disabled archive for the other domains that share this script.
+USE_MAP_ELITES = globals().get("USE_MAP_ELITES", False)
+MAP_BINS = globals().get("MAP_BINS", 20)
+MAP_ELITES_DESCRIPTORS = globals().get("MAP_ELITES_DESCRIPTORS", [])
+MAP_ELITES_OBJECTIVE = globals().get("MAP_ELITES_OBJECTIVE", "mean_reward")
+FAILED_EVAL_SENTINEL = globals().get("FAILED_EVAL_SENTINEL", -999999.0)
+
 def print_ancestry(data):
     for gene in data.keys():
         print(f'gene: {gene}')
@@ -537,17 +545,28 @@ def check4results(gene_id):
         # results_path = os.path.join(out_dir, f'{gene_id}_results.csv')
         results_path = f'{SOTA_ROOT}/results/{gene_id}_results.csv'
         with open(results_path, 'r') as file:
-            lines = file.readlines()
+            lines = [line.strip() for line in file.readlines() if line.strip()]
         # Skip header line (first line) and parse data line (second line)
-        results = lines[-1].strip() if len(lines) > 1 else lines[0].strip()
-        results = results.split(',')
+        results = lines[-1].split(',')
         fitness = [float(r.strip()) for r in results]
         # TODO: get all features later
         fitness = [fitness[i] for i in range(len(FITNESS_WEIGHTS))]
         fitness = tuple(fitness)
-        
+
+        # Keep every column by name so MAP-Elites can read behaviour
+        # descriptors that are not part of the fitness tuple.
+        metrics = {}
+        if len(lines) > 1:
+            header = [h.strip() for h in lines[0].split(',')]
+            for name, value in zip(header, results):
+                try:
+                    metrics[name] = float(value.strip())
+                except ValueError:
+                    continue
+
         GLOBAL_DATA[gene_id]['status'] = 'completed'
         GLOBAL_DATA[gene_id]['fitness'] = fitness
+        GLOBAL_DATA[gene_id]['metrics'] = metrics
         # print(f'Model from Gene: {gene_id} Evaluated')
     elif job_done is False:
         GLOBAL_DATA[gene_id]['status'] = 'completed'
@@ -952,6 +971,7 @@ def save_checkpoint(gen, folder_name="checkpoints", global_path=None, checkpoint
         checkpoint_data = {
             "population": population,
             "hof": hof, 
+            "MAP_ELITES_ARCHIVE": MAP_ELITES_ARCHIVE,
         }
     filename = os.path.join(folder_name, f'checkpoint_gen_{gen}.pkl')
     with open(filename, 'wb') as file:
@@ -1007,6 +1027,90 @@ def true_nsga2(pop, k):
     new_pop = tools.selTournamentDCD(pop, k) # mults of 4
     return new_pop
 
+def get_metrics(gene_id):
+    """Named evaluation metrics for a gene, or None if it never completed."""
+    for store in (GLOBAL_DATA, GLOBAL_DATA_HIST):
+        entry = store.get(gene_id)
+        if entry and entry.get('metrics'):
+            return entry['metrics']
+    return None
+
+def get_bin(individual):
+    """Map an individual onto a MAP_ELITES_DESCRIPTORS grid cell.
+
+    Returns a tuple of bin indices, one per descriptor, or None when the
+    individual has no usable behaviour metrics.
+    """
+    if not MAP_ELITES_DESCRIPTORS:
+        return None
+    if not individual.fitness.valid:
+        return None
+
+    metrics = get_metrics(individual[0])
+    if metrics is None:
+        return None
+
+    coords = []
+    for name, lo, hi in MAP_ELITES_DESCRIPTORS:
+        if name not in metrics:
+            return None
+        span = hi - lo
+        if span <= 0:
+            return None
+        frac = np.clip((metrics[name] - lo) / span, 0, 1)
+        coords.append(int(frac * (MAP_BINS - 1)))
+    return tuple(coords)
+
+def get_quality(individual):
+    """Score used to resolve competition for a cell (higher wins)."""
+    metrics = get_metrics(individual[0])
+    if metrics and MAP_ELITES_OBJECTIVE in metrics:
+        return metrics[MAP_ELITES_OBJECTIVE]
+    return individual.fitness.values[0]
+
+def update_archive(population):
+    """Insert individuals into the MAP-Elites archive, one elite per cell."""
+    global MAP_ELITES_ARCHIVE
+    added = replaced = 0
+    for ind in population:
+        # Avoid putting invalid generated genes/timeouts into the archive
+        if not ind.fitness.valid or tuple(ind.fitness.values) == tuple(INVALID_FITNESS_MAX):
+            continue
+        if ind.fitness.values == PLACEHOLDER_FITNESS:
+            continue
+
+        bin_idx = get_bin(ind)
+        if bin_idx is None:
+            continue
+
+        quality = get_quality(ind)
+        if not np.isfinite(quality):
+            continue
+        # train_rl.py records a large negative sentinel for models it could not
+        # evaluate. Those are failures, not behaviours, so keep them out.
+        if quality <= FAILED_EVAL_SENTINEL:
+            print(f"	‣ MAP-Elites: Skipped failed gene {ind[0]}")
+            continue
+
+        occupant = MAP_ELITES_ARCHIVE.get(bin_idx)
+        if occupant is None:
+            MAP_ELITES_ARCHIVE[bin_idx] = ind
+            added += 1
+            print(f"	‣ MAP-Elites: Added {ind[0]} to bin {bin_idx} with {MAP_ELITES_OBJECTIVE} {quality:.2f}")
+        elif quality > get_quality(occupant):
+            print(f"	‣ MAP-Elites: Replaced {occupant[0]} with {ind[0]} in bin {bin_idx} "
+                  f"({MAP_ELITES_OBJECTIVE}: {get_quality(occupant):.2f} -> {quality:.2f})")
+            MAP_ELITES_ARCHIVE[bin_idx] = ind
+            replaced += 1
+
+    total_cells = MAP_BINS ** len(MAP_ELITES_DESCRIPTORS) if MAP_ELITES_DESCRIPTORS else 0
+    coverage = (len(MAP_ELITES_ARCHIVE) / total_cells * 100) if total_cells else 0.0
+    qd_score = sum(get_quality(i) for i in MAP_ELITES_ARCHIVE.values())
+    print(f"	‣ MAP-Elites: {added} added, {replaced} replaced, "
+          f"{len(MAP_ELITES_ARCHIVE)}/{total_cells} cells filled "
+          f"({coverage:.1f}% coverage), QD-score {qd_score:.2f}")
+    return added, replaced
+
 def create_population(n, llm_model):
     individual_func = partial(toolbox.individual, llm_model=llm_model)
     return tools.initRepeat(list, individual_func, n)
@@ -1034,6 +1138,7 @@ GLOBAL_DATA = {}
 GLOBAL_DATA_HIST = {}
 GLOBAL_DATA_ANCESTRY = {}
 GLOBAL_DATA_ANCESTRY[MODEL] = {'GENES':[MODEL], 'MUTATE_TYPE':["CREATED"]}
+MAP_ELITES_ARCHIVE = {}
 
 # Main Evolution Loop
 if __name__ == "__main__":
@@ -1069,6 +1174,7 @@ if __name__ == "__main__":
         GLOBAL_DATA_ANCESTRY = global_data["GLOBAL_DATA_ANCESTRY"]
         population = population_data["population"]
         hof = population_data["hof"]
+        MAP_ELITES_ARCHIVE = population_data.get("MAP_ELITES_ARCHIVE", {})
     else:
         # Create an initial population
         start_gen = 1
@@ -1083,10 +1189,18 @@ if __name__ == "__main__":
         ind.fitness.values = PLACEHOLDER_FITNESS
         
     check_and_update_fitness(population)
+    if USE_MAP_ELITES:
+        box_print("SEEDING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
+        update_archive(population)
     # Evolution
     for gen in range(start_gen, num_generations if migration_gen == 0 else ((start_gen + migration_gen - 1) // migration_gen) * migration_gen + 1):
         GEN_COUNT = gen
-        TOP_N_GENES = tools.selSPEA2(population, NUM_EOT_ELITES)
+        if USE_MAP_ELITES:
+            # The archive, not the last batch of offspring, is the live population.
+            archived = list(MAP_ELITES_ARCHIVE.values())
+            if archived:
+                population = archived
+        TOP_N_GENES = tools.selSPEA2(population, NUM_EOT_ELITES) if population else []
         box_print(f"STARTING GENERATION: {gen}", new_line_end=False)
         print_population(population, GLOBAL_DATA)
         box_print(f"Invalid Removal", print_bbox_len=60, new_line_end=False)
@@ -1099,7 +1213,10 @@ if __name__ == "__main__":
         '''
 
         box_print("CURRENT POPULATION SIZE:", len(population))
-        while len(population) < num_elites:
+        # A MAP-Elites archive is legitimately sparse while it fills up; only a
+        # completely empty one means nothing evaluated successfully.
+        min_population = 1 if USE_MAP_ELITES else num_elites
+        while len(population) < min_population:
             print("MINIMUM NUMBER OF IND NOT ACHIEVED, TRYING AGAIN")
             GEN_COUNT = -1
             TOP_N_GENES = None
@@ -1114,6 +1231,9 @@ if __name__ == "__main__":
                 ind.fitness.values = PLACEHOLDER_FITNESS
             check_and_update_fitness(population)
             population = [ind for ind in population if ind.fitness.values != INVALID_FITNESS_MAX]
+            if USE_MAP_ELITES:
+                update_archive(population)
+                population = list(MAP_ELITES_ARCHIVE.values()) or population
             box_print("CURRENT POPULATION SIZE:", len(population))
 
         print_population(population, GLOBAL_DATA)
@@ -1121,15 +1241,24 @@ if __name__ == "__main__":
         box_print(f"Selection", print_bbox_len=60, new_line_end=False)
         # These bypass the mutation and cross-over so we dont lose them
 
-        elites = tools.selSPEA2(population, num_elites)
-        
-        # Select the next generation's parents
-        if len(population) < population_size:
-            print(f"Selecting {len(population)} offspring")
-            offspring = toolbox.select(population, len(population) - (len(population) % 4))
+        if USE_MAP_ELITES:
+            # The archive already preserves the best individual per niche, so
+            # there is no separate elite set to carry across the generation.
+            elites = []
+            # Always produce a full batch of offspring, even while the archive
+            # holds fewer individuals than population_size.
+            print(f"Selecting {population_size} offspring uniformly from the archive")
+            offspring = [random.choice(population) for _ in range(population_size)]
         else:
-            print(f"Selecting {population_size} offspring")
-            offspring = toolbox.select(population, population_size)
+            elites = tools.selSPEA2(population, num_elites)
+
+            # Select the next generation's parents
+            if len(population) < population_size:
+                print(f"Selecting {len(population)} offspring")
+                offspring = toolbox.select(population, len(population) - (len(population) % 4))
+            else:
+                print(f"Selecting {population_size} offspring")
+                offspring = toolbox.select(population, population_size)
         
         print_population(offspring, GLOBAL_DATA)
         
@@ -1191,8 +1320,14 @@ if __name__ == "__main__":
         GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
         check_and_update_fitness(offspring)
         GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
-        # Replace the old population with the offspring
-        population[:] = offspring
+        if USE_MAP_ELITES:
+            # Offspring only survive if they win a cell of the behaviour grid.
+            box_print("UPDATING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
+            update_archive(offspring)
+            population[:] = list(MAP_ELITES_ARCHIVE.values()) or offspring
+        else:
+            # Replace the old population with the offspring
+            population[:] = offspring
         # Gather all the fitnesses in one list and print the stats
         print_scores(population, FITNESS_WEIGHTS)
         hof.update(population)
@@ -1201,9 +1336,12 @@ if __name__ == "__main__":
         # mutate x prompts
         # mutate_prompts()
 
-        best_ind = tools.selBest(population, 1)[0]
         print(f"Finished Generation {gen}")
-        print(f"Best Individual: {best_ind}")
-        print(f"Best Fitness: {best_ind.fitness.values}")
+        if population:
+            best_ind = tools.selBest(population, 1)[0]
+            print(f"Best Individual: {best_ind}")
+            print(f"Best Fitness: {best_ind.fitness.values}")
+        else:
+            print("No surviving individuals this generation")
         
     print("-- End of Era --")
