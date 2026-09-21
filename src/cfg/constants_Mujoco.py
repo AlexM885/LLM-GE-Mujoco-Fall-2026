@@ -43,7 +43,7 @@ MUJOCO_EVAL_MAX_STEPS = int(os.getenv("MUJOCO_EVAL_MAX_STEPS", "1000"))
 
 #: Output directory for intermediate generation data
 OUTPUT_DIR = "mujoco_rl_output"
-PORT = 8169
+PORT = int(os.getenv("LLMGE_PORT", "8169"))
 
 CLUSTER = "pace-ice"
 LLM_MODEL = 'llama3.3'
