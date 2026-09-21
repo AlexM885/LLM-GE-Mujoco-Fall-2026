@@ -34,8 +34,8 @@ echo "Wrote hostname to $HOSTNAME_FILE"
 # Log the island controller setting for debugging
 echo "SUBMIT_ISLAND_CONTROLLER=${SUBMIT_ISLAND_CONTROLLER:-<not set>}"
 
-# Default behavior: START island controller unless explicitly disabled
-if [ "${SUBMIT_ISLAND_CONTROLLER:-1}" = "1" ]; then
+# Controller submission is opt-in; run.sh starts the requested evolution run.
+if [ "${SUBMIT_ISLAND_CONTROLLER:-0}" = "1" ]; then
     # Submit the paired island-controller job from here so the two stay in sync.
     echo "Submitting island controller (count=$COUNT)"
     sbatch island_controller.sbatch "$COUNT" "$SLURM_JOB_ID"
@@ -43,4 +43,6 @@ else
     echo "Skipping island controller submission (SUBMIT_ISLAND_CONTROLLER=${SUBMIT_ISLAND_CONTROLLER})"
 fi
 
-uv run python -m uvicorn server:app --host $SERVER_HOSTNAME --port 8137 --workers 1
+export LLMGE_PORT="${LLMGE_PORT:-8169}"
+echo "Starting LLM server on port ${LLMGE_PORT}"
+uv run python -m uvicorn server:app --host "$SERVER_HOSTNAME" --port "$LLMGE_PORT" --workers 1

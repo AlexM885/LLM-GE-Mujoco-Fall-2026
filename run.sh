@@ -8,10 +8,18 @@
 echo "launching LLM Guided Evolution"
 hostname
 module load uv
+module load cuda
 
 export UV_CACHE_DIR="${TMPDIR:-${SLURM_TMPDIR:-/tmp}}/uv-cache-${SLURM_JOB_ID:-$$}"
 mkdir -p "$UV_CACHE_DIR"
 echo "Using UV cache: $UV_CACHE_DIR"
 
 export SERVER_HOSTNAME=$(hostname)
-uv run python run_improved.py titanic_test
+export HF_HOME=/storage/ice-shared/vip-vvk/llm_storage/
+export LLMGE_PORT="${LLMGE_PORT:-8169}"
+
+uv run python run_improved.py \
+	--checkpoints mujoco_islands_run/island_llama3_Mujoco-Normal \
+	--global_path mujoco_islands_run/global_data \
+	--llm_model llama3 \
+	--prompt_group Mujoco/Normal
