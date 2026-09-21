@@ -1,4 +1,4 @@
-Make a conservative architecture or PPO-hyperparameter improvement for HalfCheetah-v4.
+Make a conservative architecture or PPO-hyperparameter improvement for Walker2d-v5.
 
 Only change the shown chunk. Do not turn this into image classification, tabular modeling, or a standalone training script.
 

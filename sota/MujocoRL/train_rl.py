@@ -7,7 +7,7 @@ import gymnasium as gym
 import numpy as np
 import time
 from stable_baselines3 import PPO
-from eval import evaluate_model
+from eval import evaluate_model, make_env, validate_reward_spec, DEFAULT_ENV_ID
 
 
 def write_failure_results(gene_id, start_time, message, stats_dir=None):
@@ -17,8 +17,10 @@ def write_failure_results(gene_id, start_time, message, stats_dir=None):
     results_dir = os.path.join(script_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, f"{gene_id}_results.csv"), "w") as f:
-        f.write("mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost\n")
-        f.write(f"-999999.0,0.0,{train_time},999999999,0.0,0.0")
+        f.write(
+            "mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost,foot_contact_0,foot_contact_1,mean_return_forward,mean_return_healthy,mean_return_ctrl\n"
+        )
+        f.write(f"-999999.0,0.0,{train_time},999999999,0.0,0.0,0.0,0.0,0.0,0.0,0.0")
 
     if stats_dir:
         os.makedirs(stats_dir, exist_ok=True)
@@ -45,6 +47,7 @@ def write_failure_results(gene_id, start_time, message, stats_dir=None):
 
 def main(
     gene_id,
+    env_id=DEFAULT_ENV_ID,
     timesteps=500000,
     eval_episodes=None,
     eval_max_steps=None,
@@ -65,7 +68,18 @@ def main(
     # so it doesn't get passed twice to PPO
     policy_class = policy_kwargs.pop("policy_class", "MlpPolicy")
 
-    env = gym.make("HalfCheetah-v4")
+    print(f"Environment: {env_id}")
+    env = make_env(env_id)
+
+    # The fitness function is the episode return, so a mis-specified reward
+    # silently invalidates every gene. Fail loudly instead.
+    problems = validate_reward_spec(env)
+    if problems:
+        env.close()
+        write_failure_results(
+            gene_id, start_time,
+            "fitness spec mismatch: " + "; ".join(problems), stats_dir)
+        return
 
     # For small smoke-test runs, clamp n_steps so PPO doesn't collect
     # more env steps than total_timesteps (avoids wasting time on login nodes)
@@ -114,9 +128,17 @@ def main(
         return
     train_time = time.time() - start_time
 
-    # MAP-Elites behaviour descriptors (see src/cfg/constants_Mujoco.py).
+    # MAP-Elites behaviour descriptors: the proportion of steps each foot spent
+    # on the ground (Nilsson & Cully, GECCO '21). See src/cfg/constants_Mujoco.py.
+    foot_contact_0 = float(metrics.get("foot_contact_0", 0.0))
+    foot_contact_1 = float(metrics.get("foot_contact_1", 0.0))
+    # Reported for analysis; no longer used as descriptors.
     mean_distance = float(metrics.get("mean_distance", 0.0))
     mean_control_cost = float(metrics.get("mean_control_cost", 0.0))
+    # Fitness decomposition: F = forward + healthy + ctrl (ctrl is negative).
+    mean_return_forward = float(metrics.get("mean_return_forward", 0.0))
+    mean_return_healthy = float(metrics.get("mean_return_healthy", 0.0))
+    mean_return_ctrl = float(metrics.get("mean_return_ctrl", 0.0))
 
     # Save results under the SOTA_ROOT/results directory (where run_improved.py expects them)
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -124,11 +146,13 @@ def main(
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, f"{gene_id}_results.csv"), "w") as f:
         f.write(
-            "mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost\n"
+            "mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost,foot_contact_0,foot_contact_1,mean_return_forward,mean_return_healthy,mean_return_ctrl\n"
         )
         f.write(
             f"{mean_reward},{std_reward},{train_time},{param_count},"
-            f"{mean_distance},{mean_control_cost}"
+            f"{mean_distance},{mean_control_cost},"
+            f"{foot_contact_0},{foot_contact_1},"
+            f"{mean_return_forward},{mean_return_healthy},{mean_return_ctrl}"
         )
 
     os.makedirs(stats_dir, exist_ok=True)
@@ -137,6 +161,7 @@ def main(
         json.dump(
             {
                 "gene_id": gene_id,
+                "env_id": env_id,
                 "timesteps": timesteps,
                 "num_eval_episodes": num_eval_episodes,
                 "max_eval_steps": max_eval_steps,
@@ -146,10 +171,20 @@ def main(
                 "param_count": param_count,
                 "mean_distance": mean_distance,
                 "mean_control_cost": mean_control_cost,
+                "foot_contact_0": foot_contact_0,
+                "foot_contact_1": foot_contact_1,
+                "foot_geom_names": metrics.get("foot_geom_names", []),
+                "mean_return_forward": mean_return_forward,
+                "mean_return_healthy": mean_return_healthy,
+                "mean_return_ctrl": mean_return_ctrl,
+                "reward_decomposition_error": metrics.get("reward_decomposition_error", 0.0),
+                "score_band": metrics.get("score_band", ""),
                 "model_path": model_path,
                 "rewards": rewards,
                 "distances": metrics.get("distances", []),
                 "control_costs": metrics.get("control_costs", []),
+                "foot_contacts_0": metrics.get("foot_contacts_0", []),
+                "foot_contacts_1": metrics.get("foot_contacts_1", []),
             },
             f,
             indent=2,
@@ -159,7 +194,14 @@ def main(
         "Mean reward: "
         f"{mean_reward}, Std: {std_reward}, Params: {param_count}, "
         f"Distance: {mean_distance}, CtrlCost: {mean_control_cost}, "
+        f"FootContact: ({foot_contact_0:.3f}, {foot_contact_1:.3f}), "
         f"Time: {train_time:.1f}s"
+    )
+    print(
+        f"Fitness F = forward {mean_return_forward:.2f}"
+        f" + alive {mean_return_healthy:.2f}"
+        f" + ctrl {mean_return_ctrl:.4f}"
+        f"  [{metrics.get('score_band', '')}]"
     )
     print(f"Saved model: {model_path}")
     print(f"Saved stats: {stats_path}")
@@ -170,6 +212,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train RL agent with evolved network")
     parser.add_argument("-network", type=str, required=True,
                         help='Module path like "models.network_XXXX"')
+    parser.add_argument("-env", type=str, default=DEFAULT_ENV_ID,
+                        help="Gymnasium environment id (e.g. Walker2d-v5)")
     parser.add_argument("-timesteps", type=int, default=500000,
                         help="Total training timesteps")
     parser.add_argument("-eval_episodes", type=int, default=None,
@@ -187,6 +231,7 @@ if __name__ == "__main__":
 
     main(
         gene_id,
+        env_id=args.env,
         timesteps=args.timesteps,
         eval_episodes=args.eval_episodes,
         eval_max_steps=args.eval_max_steps,

@@ -7,7 +7,8 @@ Mujoco RL hard rules:
 6. If the shown chunk contains GenePolicy or get_policy_kwargs, preserve class GenePolicy(ActorCriticPolicy), preserve *args and **kwargs, and get_policy_kwargs() must return {"policy_class": GenePolicy}.
 7. If the shown chunk contains get_ppo_kwargs, preserve def get_ppo_kwargs() and return only valid Stable-Baselines3 PPO keyword arguments.
 8. Use Stable-Baselines3 imports correctly: ActorCriticPolicy comes from stable_baselines3.common.policies, not stable_baselines3.
-9. HalfCheetah-v4 observations have 17 features and actions have 6 dimensions; any normalization or linear layers must be shape-compatible with 17-D observations.
+9. Walker2d-v5 observations have 17 features and actions have 6 dimensions; any normalization or linear layers must be shape-compatible with 17-D observations.
+9b. Walker2d-v5 is a bipedal walking task that terminates early when the torso height or angle leaves its healthy range, so staying upright matters as much as forward speed.
 10. Use torch.float32-compatible operations. Do not introduce float64 tensors.
 11. Do not instantiate nn.Module layers, nn.Parameter objects, or new CPU tensors inside forward(), _predict(), evaluate_actions(), or other per-batch methods. Define layers in __init__ so Stable-Baselines3 can register them and move them to the correct device.
 12. Do not override ActorCriticPolicy.forward(), _predict(), evaluate_actions(), get_distribution(), or predict_values(). Let Stable-Baselines3 handle action distributions and value/log-prob outputs.

@@ -30,6 +30,12 @@ TRAIN_FILE = "sota/MujocoRL/train_rl.py"
 ISLAND_TEMP_SCRIPT = os.path.join("src", "island_temp_script_{ISLAND_NUM}.sh")
 #: Dedicated uv project used only for Mujoco RL evaluation jobs (relative path for cluster)
 MUJOCO_EVAL_PROJECT_DIR = "sota/MujocoRL/eval_env"
+#: Gymnasium environment the genes are trained and evaluated on. Walker2d is
+#: the MuJoCo counterpart of the QDWalker task in Nilsson & Cully (GECCO '21).
+#: v5 is the current revision; it fixes v4's bug of granting healthy_reward on
+#: the terminating unhealthy step. Do not pool v4 and v5 results: the reward
+#: accounting differs and trajectories diverge numerically within ~10 steps.
+MUJOCO_ENV_ID = os.getenv("MUJOCO_ENV_ID", "Walker2d-v5")
 #: Keep eval runs configurable without changing the shared project environment.
 MUJOCO_EVAL_TIMESTEPS = int(os.getenv("MUJOCO_EVAL_TIMESTEPS", "500000"))
 MUJOCO_EVAL_EPISODES = int(os.getenv("MUJOCO_EVAL_EPISODES", "10"))
@@ -128,6 +134,7 @@ RUNLINE_TMP = "{}_{}"
 EVAL_RUNLINE = (
     f"{UV_PYTHON} {{}} "
     "-network models.{} "
+    f"-env {MUJOCO_ENV_ID} "
     f"-timesteps {MUJOCO_EVAL_TIMESTEPS} "
     f"-eval_episodes {MUJOCO_EVAL_EPISODES} "
     f"-eval_max_steps {MUJOCO_EVAL_MAX_STEPS}"
@@ -213,16 +220,42 @@ MAP-Elites Constants
 #: Use MAP-Elites (illumination over a behaviour grid) instead of NSGA-II
 #: selection. When False, run_improved.py keeps its original elitist loop.
 USE_MAP_ELITES = True
-#: Number of bins per behaviour dimension; the archive is MAP_BINS ** 2 cells.
-MAP_BINS = 20
+#: Bins per behaviour dimension. The paper discretizes the QDWalker behaviour
+#: space into 1024 niches, 32 bins per dimension, over a 2-D descriptor.
+MAP_BINS = 32
 #: Behaviour descriptors, as (metric name, min, max). The metric names must
 #: match columns written by sota/MujocoRL/train_rl.py. Edit this list to
 #: re-dimension the archive - get_bin() adapts to however many entries it has.
+#:
+#: Following Nilsson & Cully (GECCO '21), the descriptor is the proportion of
+#: simulation steps each foot spends in contact with the ground. Walker2d has
+#: two feet, so the archive is 32 x 32 = 1024 niches. Both components are
+#: proportions and therefore bounded to [0, 1] by construction.
+#: foot_contact_0 / _1 are ordered by MuJoCo geom id: for Walker2d-v5 that is
+#: foot_geom (right) then foot_left_geom (left).
 MAP_ELITES_DESCRIPTORS = [
-    ("mean_distance", -500.0, 2000.0),   # reasonable for HalfCheetah
-    ("mean_control_cost", 0.0, 10.0),
+    ("foot_contact_0", 0.0, 1.0),
+    ("foot_contact_1", 0.0, 1.0),
 ]
 #: Results column that ranks occupants competing for the same cell (maximised).
+#:
+#: This is the episode fitness F: the undiscounted return over a rollout of at
+#: most 1000 steps, averaged over MUJOCO_EVAL_EPISODES rollouts.
+#:
+#:     F = sum_t ( r_forward(t) + r_healthy(t) - c_ctrl(t) )
+#:
+#:     r_forward = 1.0   * v_x                 (v_x = dx/dt)
+#:     r_healthy = 1.0   if healthy else 0     (z in [0.8, 2.0], pitch in [-1, 1])
+#:     c_ctrl    = 0.001 * ||a_t||^2           (sum of the 6 squared torques)
+#:
+#: Leaving either healthy range terminates the episode. The weights are pinned
+#: explicitly in sota/MujocoRL/eval.py (WALKER_REWARD_SPEC) and validated at the
+#: start of every evaluation job, so a gymnasium upgrade cannot silently change
+#: what fitness means. The three terms are recorded per gene as
+#: mean_return_forward / _healthy / _ctrl and sum to mean_reward.
+#:
+#: Indicative bands: <50 falls immediately, 300-800 shuffling,
+#: 3000+ sustained locomotion.
 MAP_ELITES_OBJECTIVE = "mean_reward"
 #: Sentinel reward that sota/MujocoRL/train_rl.py writes when a generated model
 #: cannot be built, trained or evaluated. Genes at or below it never enter the

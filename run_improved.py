@@ -1058,7 +1058,9 @@ def get_bin(individual):
         if span <= 0:
             return None
         frac = np.clip((metrics[name] - lo) / span, 0, 1)
-        coords.append(int(frac * (MAP_BINS - 1)))
+        # MAP_BINS equal-width bins over [lo, hi]; the top edge falls in the
+        # last bin rather than in a degenerate bin of its own.
+        coords.append(min(int(frac * MAP_BINS), MAP_BINS - 1))
     return tuple(coords)
 
 def get_quality(individual):
@@ -1108,7 +1110,7 @@ def update_archive(population):
     qd_score = sum(get_quality(i) for i in MAP_ELITES_ARCHIVE.values())
     print(f"	‣ MAP-Elites: {added} added, {replaced} replaced, "
           f"{len(MAP_ELITES_ARCHIVE)}/{total_cells} cells filled "
-          f"({coverage:.1f}% coverage), QD-score {qd_score:.2f}")
+          f"({coverage:.1f}% coverage), QD-score(raw) {qd_score:.2f}")
     return added, replaced
 
 def create_population(n, llm_model):
