@@ -57,7 +57,7 @@ remaining_seconds() {
     echo $(( 10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s ))
 }
 
-log "start on $(hostname), gpu=${CUDA_VISIBLE_DEVICES:-none}, checkpoint step=$(ckpt_step)"
+log "start on $(hostname), gpu=${CUDA_VISIBLE_DEVICES:-none}, jax_platforms=${JAX_PLATFORMS:-auto}, checkpoint step=$(ckpt_step)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || true
 
 if [ -f "$XQC_RUN_DIR/DONE" ]; then
