@@ -32,8 +32,8 @@ log() { echo "[chain $(date '+%F %T')] $*"; echo "$(date '+%F %T') job=$SLURM_JO
 cancel_rest() {
     # Cancel every job of this chain that is still pending, other than ourselves.
     local ids
-    ids=$(grep -v "^${SLURM_JOB_ID}\$" "$CHAIN_DIR/jobs.txt" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-    [ -n "$ids" ] && scancel --state=PENDING "${ids//,/ }" 2>/dev/null
+    ids=$(squeue -h -u "$USER" -t PENDING -o %i 2>/dev/null | grep -Fxf "$CHAIN_DIR/jobs.txt" | grep -vx "$SLURM_JOB_ID" | tr '\n' ' ')
+    [ -n "$ids" ] && scancel $ids 2>/dev/null
     log "cancelled pending chain jobs: ${ids:-none} ($1)"
 }
 
