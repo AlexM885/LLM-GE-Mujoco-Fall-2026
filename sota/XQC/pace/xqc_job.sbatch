@@ -14,8 +14,8 @@
 # Behaviour:
 #   - resumes from the newest checkpoint in XQC_RUN_DIR (train_xqc.py resume=auto)
 #   - Slurm sends USR1 to this script 300 s before the wall limit; it is forwarded
-#     to Python, which checkpoints and exits 0. max_runtime_s is also set from the
-#     real remaining time as a fallback in case the signal is lost.
+#     to Python, which checkpoints and exits 0. max_runtime_s is also set to stop
+#     120 s before the real limit, a fallback in case the signal is lost.
 #   - when DONE appears, the remaining queued jobs of the chain are cancelled
 #   - two consecutive jobs that fail without advancing the checkpoint abort the
 #     chain (cancel the rest) instead of burning allocations in a crash loop
@@ -68,8 +68,8 @@ fi
 
 STEP_BEFORE=$(ckpt_step)
 LEFT=$(remaining_seconds)
-# Fallback budget: stop 10 min before the wall limit even without the signal.
-MAX_RUNTIME=$(( LEFT > 1200 ? LEFT - 600 : LEFT / 2 ))
+# Fallback only: stop 120 s before the wall limit even if USR1 never arrives.
+MAX_RUNTIME=$(( LEFT > 180 ? LEFT - 120 : 60 ))
 
 mapfile -t OVERRIDES < <(grep -v '^\s*#' "$XQC_RUN_DIR/run.args" | sed '/^\s*$/d')
 cd "$XQC_CODE"

@@ -39,6 +39,11 @@ export PYTHONPYCACHEPREFIX="$XQC_BASE/cache/pycache"
 
 # JAX / MuJoCo runtime
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# jax[cuda12] 0.4.30 errors out (instead of falling back) on nodes without a
+# GPU, e.g. login and ice-cpu nodes. Force CPU there.
+if [ -z "${JAX_PLATFORMS:-}" ] && ! nvidia-smi -L >/dev/null 2>&1; then
+    export JAX_PLATFORMS=cpu
+fi
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
 

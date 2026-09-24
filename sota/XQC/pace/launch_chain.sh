@@ -8,7 +8,9 @@
 #   -t, --time HH:MM:SS  wall time per job, max 08:00:00 (default 08:00:00)
 #   -p, --partition P    Slurm partition (default $XQC_PARTITION)
 #   -q, --qos Q          Slurm QoS (default $XQC_QOS)
-#   -g, --gres G         GPU request (default $XQC_GRES or gpu:1)
+#   -g, --gres G         GPU request (default $XQC_GRES or gpu:1; "none" for CPU jobs)
+#   -c, --cpus N         CPUs per job (default 4)
+#   --signal-lead S      seconds before the wall limit that USR1 is sent (default 300)
 #   --dry-run            print the sbatch commands without submitting
 #
 # First launch of RUN_NAME stores the Hydra overrides in $XQC_RUNS/RUN_NAME/run.args.
@@ -29,13 +31,13 @@ export XQC_REPO="${XQC_REPO:-$(cd "$HERE/../../.." && pwd)}"
 # shellcheck disable=SC1091
 source "$HERE/env.sh"
 
-usage() { sed -n '2,24p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,26p' "$0"; exit "${1:-0}"; }
 [ $# -ge 1 ] || usage 1
 [[ "$1" == -h || "$1" == --help ]] && usage 0
 RUN_NAME="$1"; shift
 [[ "$RUN_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "bad run name: $RUN_NAME" >&2; exit 1; }
 
-JOBS=3; WALL="08:00:00"; DRY=0
+JOBS=3; WALL="08:00:00"; DRY=0; CPUS=4; LEAD=300
 PARTITION="${XQC_PARTITION:-}"; QOS="${XQC_QOS:-}"; GRES="${XQC_GRES:-gpu:1}"
 OVERRIDES=()
 while [ $# -gt 0 ]; do
@@ -45,6 +47,8 @@ while [ $# -gt 0 ]; do
         -p|--partition) PARTITION="$2"; shift 2 ;;
         -q|--qos) QOS="$2"; shift 2 ;;
         -g|--gres) GRES="$2"; shift 2 ;;
+        -c|--cpus) CPUS="$2"; shift 2 ;;
+        --signal-lead) LEAD="$2"; shift 2 ;;
         --dry-run) DRY=1; shift ;;
         --) shift; OVERRIDES=("$@"); break ;;
         *) echo "unknown option $1" >&2; usage 1 ;;
@@ -55,7 +59,7 @@ done
 IFS=: read -r H M S <<< "$WALL"
 SECS=$(( 10#$H * 3600 + 10#$M * 60 + 10#${S:-0} ))
 if [ "$SECS" -gt $(( 8 * 3600 )) ]; then echo "wall time $WALL exceeds 08:00:00" >&2; exit 1; fi
-if [ "$SECS" -le 600 ]; then echo "note: wall time $WALL is shorter than the 300 s pre-timeout signal margin plus startup; fine for tests only" >&2; fi
+if [ "$SECS" -le $(( LEAD + 120 )) ]; then echo "wall time $WALL leaves no training time before the ${LEAD}s signal" >&2; exit 1; fi
 
 RUN_DIR="$XQC_RUNS/$RUN_NAME"
 mkdir -p "$RUN_DIR/chain" "$RUN_DIR/slurm"
@@ -82,9 +86,10 @@ if [ -f "$RUN_DIR/chain/jobs.txt" ]; then
 fi
 echo 0 > "$RUN_DIR/chain/consecutive_failures"
 
-SBATCH_OPTS=(--job-name="xqc_${RUN_NAME}" --time="$WALL" --gres="$GRES"
+SBATCH_OPTS=(--job-name="xqc_${RUN_NAME}" --time="$WALL" --cpus-per-task="$CPUS" --signal="B:USR1@$LEAD"
     --output="$RUN_DIR/slurm/%j.out" --error="$RUN_DIR/slurm/%j.out"
     --export=ALL,XQC_RUN_DIR="$RUN_DIR",XQC_BASE="$XQC_BASE",XQC_REPO="$XQC_REPO")
+if [ "$GRES" = none ]; then SBATCH_OPTS+=(--gres=none); else SBATCH_OPTS+=(--gres="$GRES"); fi
 [ -n "$PARTITION" ] && SBATCH_OPTS+=(--partition="$PARTITION")
 [ -n "$QOS" ] && SBATCH_OPTS+=(--qos="$QOS")
 
