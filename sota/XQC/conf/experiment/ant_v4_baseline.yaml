@@ -1,0 +1,13 @@
+# @package _global_
+# XQC baseline on Ant-v4 with the paper's settings (1M env steps, UTD 2,
+# 1M replay buffer, batch 256, action repeat 1). Published: 7,612 +- 268 at 1M
+# steps (10 seeds, published_results/xqc.csv). Launch with +experiment=ant_v4_baseline.
+defaults:
+  - override /env: Ant-v4
+
+seed: 0
+num_seeds: 1
+max_steps: 1_000_000
+eval_interval: 25_000
+eval_episodes: 10
+checkpoint_interval: 50_000

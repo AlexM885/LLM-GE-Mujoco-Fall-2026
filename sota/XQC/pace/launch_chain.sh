@@ -28,8 +28,13 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export XQC_REPO="${XQC_REPO:-$(cd "$HERE/../../.." && pwd)}"
+# env.sh sets JAX_PLATFORMS=cpu on the GPU-less login node. Don't let that leak
+# into jobs through --export=ALL: each job re-sources env.sh on its own node.
+# A JAX_PLATFORMS the user set explicitly is still passed through.
+JAX_PLATFORMS_USER="${JAX_PLATFORMS-__unset__}"
 # shellcheck disable=SC1091
 source "$HERE/env.sh"
+if [ "$JAX_PLATFORMS_USER" = __unset__ ]; then unset JAX_PLATFORMS; fi
 
 usage() { sed -n '2,26p' "$0"; exit "${1:-0}"; }
 [ $# -ge 1 ] || usage 1
