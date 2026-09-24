@@ -79,14 +79,24 @@ def main():
         nobs, r, d, tr, _ = env.step(a)
         rb.insert(obs, a, r, env.generate_masks(d, tr), tr, nobs)
         obs = nobs
+    # Two warm-up calls: the first compiles with a Python-int step, the second
+    # recompiles once the learner step becomes a JAX array.
     t = time.time()
-    agent.update(rb.sample_parallel_multibatch(256, 2), num_updates=2)
+    for _ in range(2):
+        jax.block_until_ready(agent.update(rb.sample_parallel_multibatch(256, 2), num_updates=2))
     t_compile = time.time() - t
+    n = 200
     t = time.time()
-    for _ in range(50):
+    for _ in range(n):
         info = agent.update(rb.sample_parallel_multibatch(256, 2), num_updates=2)
     jax.block_until_ready(info)
-    print(f"XQC update ok: first call {t_compile:.1f}s (compile), then {(time.time() - t) / 50 * 1000:.1f} ms per env step (2 updates)")
+    t_update = (time.time() - t) / n
+    t = time.time()
+    for _ in range(n):
+        agent.sample_actions_with_log_probs(obs)
+    t_act = (time.time() - t) / n
+    print(f"XQC update ok: compile {t_compile:.1f}s; per env step: update {t_update * 1000:.1f} ms "
+          f"+ act {t_act * 1000:.1f} ms -> about {(t_update + t_act) * 1e6 / 3600:.1f} h per 1M steps (excl. env and eval)")
     print("CHECK_ENV: OK")
     return 0
 
