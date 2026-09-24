@@ -23,16 +23,25 @@ eval_video_frameskip: 1
 eval_video_num_envs: 1
 eval_bias: 0
 
+# Run directory, checkpointing and resume (used by train_xqc.py)
+run_dir: ./runs/${env.name}/seed${seed}
+checkpoint_interval: 50_000   # env steps between periodic checkpoints (0 = off)
+keep_checkpoints: 2           # newest complete checkpoints kept on disk
+save_replay_buffer: true      # false = smaller checkpoints, but resume restarts with an empty buffer
+max_runtime_s:                # optional self-imposed limit per job; checkpoint and exit when reached
+resume: auto                  # auto = resume if a checkpoint exists, never = refuse if one exists
+
 wandb:
   project_name: XQC
   entity: null
   mode: disabled
 
 hydra:
+  run:
+    dir: ${run_dir}/hydra/${now:%Y-%m-%d_%H-%M-%S}
   job:
     env_set:
       XLA_PYTHON_CLIENT_PREALLOCATE: "false"
       MUJOCO_GL: "egl"
       MUJOCO_EGL_DEVICE_ID: "0"
       MKL_SERVICE_FORCE_INTEL: "0"
-      WANDB_DIR: "/tmp"
