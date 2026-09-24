@@ -1,0 +1,29 @@
+# XQC baseline dependencies (MuJoCo suite only). Python 3.9 exactly.
+# Versions match upstream pyproject (pyproject.upstream.toml, commit 9a6832b)
+# except where noted. A full `pip freeze` of the PACE env is kept in
+# requirements.lock.txt for exact reproduction.
+#
+# Dropped vs upstream (not needed for Gym MuJoCo envs): torch, mujoco-py,
+# humanoid_bench, MyoSuite, moviepy, matplotlib, pandas, jaxopt, dotmap, Cython.
+# gymnasium: upstream pins a git commit (d92e030, Feb 2025) whose metadata
+# newer uv rejects; 1.0.0 is the nearest release.
+# jax: install with the [cuda12] extra on GPU nodes (see scripts/pace/install_env.sh).
+
+jax==0.4.30
+jaxlib==0.4.30
+flax==0.8.4
+optax==0.2.3
+tensorflow-probability==0.24.0
+numpy==1.24.1
+gymnasium==1.0.0
+mujoco==3.1.6
+dm-control==1.0.20
+Shimmy==2.0.0
+hydra-core==1.3.2
+omegaconf==2.3.0
+wandb==0.16.6
+imageio==2.34.2
+termcolor==2.4.0
+tqdm==4.66.1
+setuptools==80.9.0
+wheel==0.45.1
