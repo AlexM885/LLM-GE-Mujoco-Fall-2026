@@ -8,6 +8,6 @@ defaults:
 seed: 0
 num_seeds: 1
 max_steps: 1_000_000
-eval_interval: 10_000
+eval_interval: 25_000
 eval_episodes: 10
 checkpoint_interval: 50_000
