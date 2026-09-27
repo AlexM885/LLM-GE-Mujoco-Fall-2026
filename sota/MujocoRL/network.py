@@ -1,29 +1,35 @@
 # --PROMPT LOG--
 
 import torch.nn as nn
-from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.td3.policies import TD3Policy
 
 # --OPTION--
 
 # -- NOTE --
-# Note: The class GenePolicy inherits from ActorCriticPolicy (Stable-Baselines3).
+# Note: The class GenePolicy inherits from TD3Policy (Stable-Baselines3).
 # It must always accept *args and **kwargs and pass them to super().__init__().
 # get_policy_kwargs() must return a dict with "policy_class" key.
-# get_ppo_kwargs() must return a dict of valid PPO hyperparameters.
-# Do not override forward(), _predict(), or evaluate_actions(); let SB3 handle those.
-# Prefer mutating HIDDEN_PI, HIDDEN_VF, ACTIVATION, and PPO kwargs.
+# get_td3_kwargs() must return a dict of valid TD3 hyperparameters, plus the
+# optional "exploration_noise" key (std of Gaussian action noise, handled by train_rl.py).
+# Do not override forward(), _predict(), make_actor() or make_critic(); let SB3 handle those.
+# Prefer mutating HIDDEN_PI, HIDDEN_QF, ACTIVATION, N_CRITICS and TD3 kwargs.
 # -- NOTE --
 
 # ===============================
 # === Architecture Gene Space ===
 # ===============================
 
-HIDDEN_PI = [64, 64]
-HIDDEN_VF = [64, 64]
-ACTIVATION = nn.Tanh   # Tanh is strong for MuJoCo
+
+# Seed follows Nilsson & Cully, "Policy Gradient Assisted MAP-Elites" (GECCO '21):
+
+HIDDEN_PI = [128, 128]
+HIDDEN_QF = [256, 256]
+ACTIVATION = nn.ReLU
+N_CRITICS = 2
 
 
-class GenePolicy(ActorCriticPolicy):
+
+class GenePolicy(TD3Policy):
     def __init__(self, *args, **kwargs):
         super().__init__(
             *args,
@@ -31,8 +37,9 @@ class GenePolicy(ActorCriticPolicy):
             activation_fn=ACTIVATION,
             net_arch=dict(
                 pi=HIDDEN_PI,
-                vf=HIDDEN_VF
+                qf=HIDDEN_QF
             ),
+            n_critics=N_CRITICS,
         )
 
 
@@ -44,21 +51,24 @@ def get_policy_kwargs():
 # --OPTION--
 
 # ===============================
-# === PPO Hyperparameter Gene ===
+# === TD3 Hyperparameter Gene ===
 # ===============================
 
-def get_ppo_kwargs():
+def get_td3_kwargs():
+    # Values from Table 1 of the PGA-MAP-Elites paper; learning_starts and
+    # exploration_noise follow the reference TD3 implementation (Fujimoto et al.).
     return dict(
         learning_rate=3e-4,
+        buffer_size=1_000_000,
+        learning_starts=25_000,
+        batch_size=256,
+        tau=0.005,
         gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.0,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        n_steps=2048,
-        batch_size=64,
-        n_epochs=10,
-        normalize_advantage=True,
+        train_freq=1,
+        gradient_steps=1,
+        policy_delay=2,
+        target_policy_noise=0.2,
+        target_noise_clip=0.5,
+        exploration_noise=0.1,
         verbose=0,
     )

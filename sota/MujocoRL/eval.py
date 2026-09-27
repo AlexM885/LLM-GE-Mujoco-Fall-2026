@@ -1,5 +1,5 @@
 """
-Evaluate a trained PPO locomotion model (default: Walker2d-v5).
+Evaluate a trained TD3 locomotion model (default: Walker2d-v5).
 
 Can be used standalone:
     python eval.py --model path/to/model.zip
@@ -23,7 +23,7 @@ import os
 import argparse
 import numpy as np
 import gymnasium as gym
-from stable_baselines3 import PPO
+from stable_baselines3 import TD3
 
 DEFAULT_ENV_ID = os.getenv("MUJOCO_ENV_ID", "Walker2d-v5")
 
@@ -188,8 +188,8 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000):
 
     Parameters
     ----------
-    model : stable_baselines3.PPO
-        The trained PPO model.
+    model : stable_baselines3.TD3
+        The trained TD3 model.
     env : gymnasium.Env
         The environment to evaluate in.
     num_episodes : int
@@ -333,7 +333,7 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate a trained PPO locomotion model")
+    parser = argparse.ArgumentParser(description="Evaluate a trained TD3 locomotion model")
     parser.add_argument("--model", type=str, required=True,
                         help="Path to the trained model .zip file")
     parser.add_argument("--env", type=str, default=DEFAULT_ENV_ID,
@@ -354,7 +354,7 @@ def main():
     env = make_env(env_id)
     for problem in validate_reward_spec(env):
         print(f"  WARNING: fitness spec mismatch -> {problem}")
-    model = PPO.load(args.model, env=env)
+    model = TD3.load(args.model, env=env)
 
     print(f"\n{'='*50}")
     print(f"  Evaluating {args.episodes} episodes on {env_id}")
