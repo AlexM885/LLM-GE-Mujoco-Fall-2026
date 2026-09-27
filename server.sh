@@ -19,9 +19,7 @@ module load uv
 
 # Make sure CUDA can see all GPUs
 export CUDA_VISIBLE_DEVICES=0,1
-export UV_CACHE_DIR="${TMPDIR:-${SLURM_TMPDIR:-/tmp}}/uv-cache-${SLURM_JOB_ID:-$$}"
-mkdir -p "$UV_CACHE_DIR"
-echo "Using UV cache: $UV_CACHE_DIR"
+source scripts/pace_cache_env.sh
 
 export SERVER_HOSTNAME=$(hostname)
 

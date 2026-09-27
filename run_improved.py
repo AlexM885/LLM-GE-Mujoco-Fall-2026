@@ -32,6 +32,44 @@ if not AVAILABLE_LLM_MODELS and globals().get("LLM_MODEL"):
 
 LLM_SERVER_READY = False
 
+# Sparse feedback settings. Only the Mujoco constants define these; default to
+# "off" so the other domains that share this script are unaffected.
+FEEDBACK_MODE = globals().get("FEEDBACK_MODE", "off")
+FEEDBACK_REQUIRED = globals().get("FEEDBACK_REQUIRED", False)
+try:
+    from src import visual_feedback
+except Exception as _feedback_import_error:  # pragma: no cover - optional
+    visual_feedback = None
+    print(f"WARNING: visual_feedback unavailable ({_feedback_import_error})")
+_FEEDBACK_RESOLVED = {}
+
+
+def resolve_parent_feedback(parent_gene):
+    """Cached behaviour feedback text for a parent, or None when unavailable.
+
+    The controller never runs the VLM; it only reads the cache populated by the
+    observer batch job. Results are memoised per parent within a run.
+    """
+    if visual_feedback is None or FEEDBACK_MODE == "off" or not parent_gene:
+        return None
+    if parent_gene in _FEEDBACK_RESOLVED:
+        return _FEEDBACK_RESOLVED[parent_gene]
+    text = None
+    try:
+        result = visual_feedback.resolve_feedback(parent_gene)
+    except Exception as exc:  # never let feedback break evolution
+        print(f"WARNING: feedback lookup failed for {parent_gene}: {exc}")
+        result = None
+    if result:
+        text, cache_key, _record = result
+        print(f"\t‣ Feedback cache hit for {parent_gene} ({cache_key[:12]}) "
+              f"mode={FEEDBACK_MODE}")
+    else:
+        print(f"\t☠ No cached {FEEDBACK_MODE} feedback for parent {parent_gene}")
+    _FEEDBACK_RESOLVED[parent_gene] = text
+    return text
+
+
 # MAP-Elites settings. Only the Mujoco constants define these, so fall back to
 # a disabled archive for the other domains that share this script.
 USE_MAP_ELITES = globals().get("USE_MAP_ELITES", False)
@@ -111,7 +149,8 @@ def update_ancestry(gene_id_child, gene_id_parent, ancestry, mutation_type=None,
         ancestry[gene_id_child]['MUTATE_TYPE'] = copy.deepcopy(ancestry[gene_id_parent]['MUTATE_TYPE']) + ["CrossOver"]
     return ancestry
 
-def generate_template(PROB_EOT, GEN_COUNT, TOP_N_GENES, SOTA_ROOT, SEED_NETWORK, ROOT_DIR, llm_model):
+def generate_template(PROB_EOT, GEN_COUNT, TOP_N_GENES, SOTA_ROOT, SEED_NETWORK, ROOT_DIR, llm_model,
+                      feedback_txt=None):
     """
     Generates a template based on given probabilities and gene information.
     
@@ -129,6 +168,10 @@ def generate_template(PROB_EOT, GEN_COUNT, TOP_N_GENES, SOTA_ROOT, SEED_NETWORK,
         Seed network file path.
     ROOT_DIR: 
         Root directory for templates.
+    feedback_txt: str, optional
+        Cached behaviour feedback for the parent. Appended after the prompt body
+        (and its code placeholder), so the code chunk and hard rules are
+        unchanged and the feedback is read last.
     
     Returns
     -------
@@ -168,6 +211,10 @@ def generate_template(PROB_EOT, GEN_COUNT, TOP_N_GENES, SOTA_ROOT, SEED_NETWORK,
         with open(rules_path, 'r') as file:
             rules_txt = file.read()
         template_txt = f'{template_txt}\n{rules_txt}'
+    if feedback_txt:
+        # Appended last. The literal "{}" code placeholder in the body is filled
+        # by augment_network, so this feedback stays after the code and rules.
+        template_txt = f'{template_txt}\n{feedback_txt}'
     return template_txt, mute_type
 
 def write_bash_script(llm_model,
@@ -193,8 +240,15 @@ def write_bash_script(llm_model,
     gene_id_parent = fetch_gene(input_filename_x)
     gene_id_child = fetch_gene(output_filename)
     if python_file=='src/llm_mutation.py':
+        # Feedback is only meaningful when mutating an already-trained parent,
+        # not when creating the initial population from the seed network.
+        feedback_txt = None
+        is_mutation = os.path.abspath(input_filename_x) != os.path.abspath(SEED_NETWORK)
+        if is_mutation:
+            feedback_txt = resolve_parent_feedback(gene_id_parent)
         template_txt, mute_type = generate_template(PROB_EOT, GEN_COUNT, TOP_N_GENES, 
-                                                    SOTA_ROOT, SEED_NETWORK, ROOT_DIR, llm_model)
+                                                    SOTA_ROOT, SEED_NETWORK, ROOT_DIR, llm_model,
+                                                    feedback_txt=feedback_txt)
         if GEN_COUNT >= 0: # this does not need to happen at creation of population
             GLOBAL_DATA_ANCESTRY = update_ancestry(gene_id_child, gene_id_parent, GLOBAL_DATA_ANCESTRY, 
                                                     mutation_type=mute_type, gene_id_parent2=None)
@@ -203,6 +257,10 @@ def write_bash_script(llm_model,
         os.makedirs(out_dir, exist_ok=True)
         with open(file_path, 'w') as file:
             file.write(template_txt)
+        if feedback_txt:
+            feedback_path = os.path.join(out_dir, f'{gene_id_child}_feedback.txt')
+            with open(feedback_path, 'w') as file:
+                file.write(feedback_txt)
         temp_text = f'{python_file} {input_filename_x} {output_filename} {file_path} --top_p {top_p} --temperature {temperature}'
         python_runline = f"uv run python {temp_text} --apply_quality_control '{QC_CHECK_BOOL}' --llm_model {llm_model}"
     elif python_file=='src/llm_crossover.py':
@@ -877,6 +935,11 @@ def customMutation(individual, llm_model, indpb, temp_min=0.02, temp_max=0.35):
     # if random.random() < indpb: # TODO: connect this to temp
     config = load_yaml()
     old_gene_id = individual[0]
+    if FEEDBACK_MODE != "off" and FEEDBACK_REQUIRED:
+        if not resolve_parent_feedback(old_gene_id):
+            print(f'\t☠ FEEDBACK_REQUIRED: no cached feedback for {old_gene_id}; '
+                  f'skipping mutation')
+            return individual
     # Generate a new gene ID
     new_gene_id = generate_random_string(length=24)
     print(f'Mutating: {old_gene_id} and Replacing with: {new_gene_id}')

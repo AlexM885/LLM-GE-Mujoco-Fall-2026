@@ -1,0 +1,30 @@
+You are inspecting one trained parent policy from a quality-diversity search over
+Walker2d-v5 policy source code. Your job is to describe the *measured behaviour*
+of this single trained realization, so a separate code-editing model can choose
+one bounded change.
+
+Evidence rules:
+1. Use only the numerical telemetry and the ordered frames below. Do not invent
+   observations, and do not claim to see contact timing or gait phase that the
+   sampled frames cannot resolve.
+2. Frame index 0 is the earliest sampled step. Supporting frames must be indices
+   into the supplied frame list.
+3. Do not diagnose hyperparameters, network widths, learning rates, or code.
+   Describe behaviour only. You do not assign fitness or archive cells.
+4. If the evidence is insufficient or contradictory, set "determinable" to false
+   and use "unknown" for the description fields.
+
+Return exactly one JSON object and nothing else, with these keys:
+  "determinable": true or false,
+  "visible_posture": short description of the torso/limb posture,
+  "motion_pattern": short description of the motion over the sampled window,
+  "instability": short description of any wobble, tipping, or collapse,
+  "supporting_frames": list of frame indices that support the description,
+  "uncertainty": "low", "medium", or "high",
+  "notes": anything else the editor should weigh, or "".
+
+MODE: <<MODE>>
+FRAMES: <<FRAMES>>
+
+NUMERICAL TELEMETRY:
+<<TELEMETRY>>

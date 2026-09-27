@@ -10,12 +10,9 @@ hostname
 module load uv
 module load cuda
 
-export UV_CACHE_DIR="${TMPDIR:-${SLURM_TMPDIR:-/tmp}}/uv-cache-${SLURM_JOB_ID:-$$}"
-mkdir -p "$UV_CACHE_DIR"
-echo "Using UV cache: $UV_CACHE_DIR"
+source scripts/pace_cache_env.sh
 
 export SERVER_HOSTNAME=$(hostname)
-export HF_HOME=/storage/ice-shared/vip-vvk/llm_storage/
 export LLMGE_PORT="${LLMGE_PORT:-8169}"
 
 uv run python run_improved.py \

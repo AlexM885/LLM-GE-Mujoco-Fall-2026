@@ -1,0 +1,13 @@
+[project]
+name = "llmge-behavior-observer"
+version = "0.1.0"
+description = "Dedicated uv environment for the frozen Qwen2.5-VL behaviour observer."
+requires-python = ">=3.10, <3.13"
+dependencies = [
+    "torch>=2.4.0",
+    "torchvision>=0.19.0",
+    "transformers>=4.49.0",
+    "accelerate>=0.34.0",
+    "pillow>=10.0.0",
+    "qwen-vl-utils>=0.0.8",
+]

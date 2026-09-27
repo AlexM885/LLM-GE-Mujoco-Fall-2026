@@ -205,15 +205,15 @@ NUM_EOT_ELITES = 1
 GENERATION = 0
 PROB_QC = 0.0
 PROB_EOT = 0.0  # Disable EoT for initial RL runs (needs prior elite genes)
-num_generations = 30  # Number of generations
-start_population_size = 32  # Starting population size
-population_size = 32  # Population size each generation
-crossover_probability = 0.35  # Probability of mating two individuals
-mutation_probability = 0.8  # Probability of mutating an individual
-num_elites = 8
+num_generations = int(os.getenv("LLMGE_NUM_GENERATIONS", "30"))  # Number of generations
+start_population_size = int(os.getenv("LLMGE_START_POPULATION_SIZE", "32"))  # Starting population size
+population_size = int(os.getenv("LLMGE_POPULATION_SIZE", "32"))  # Population size each generation
+crossover_probability = float(os.getenv("LLMGE_CROSSOVER_PROBABILITY", "0.35"))  # Probability of mating two individuals
+mutation_probability = float(os.getenv("LLMGE_MUTATION_PROBABILITY", "0.8"))  # Probability of mutating an individual
+num_elites = int(os.getenv("LLMGE_NUM_ELITES", "8"))
 hof_size = 100
 max_gen_attempts = 5
-migration_gen = 5
+migration_gen = int(os.getenv("LLMGE_MIGRATION_GEN", "5"))
 """
 MAP-Elites Constants
 """
@@ -261,6 +261,70 @@ MAP_ELITES_OBJECTIVE = "mean_reward"
 #: cannot be built, trained or evaluated. Genes at or below it never enter the
 #: archive, so a broken model cannot occupy a niche or be drawn as a parent.
 FAILED_EVAL_SENTINEL = -999999.0
+
+#: Where train_rl.py writes trained PPO checkpoints and per-gene statistics.
+MUJOCO_TRAINED_MODEL_DIR = os.path.join(SOTA_ROOT, "trained_models")
+MUJOCO_STATS_DIR = os.path.join(SOTA_ROOT, "stats")
+
+"""
+Sparse visual feedback for LLM-guided mutation
+----------------------------------------------
+The genome is Python source, so a trained checkpoint is only one realization of
+its genome. The observer inspects a selected parent's behaviour once, caches a
+short structured description, and the existing text code LLM reuses that
+description for several mutations of the same parent.
+
+FEEDBACK_MODE:
+    "off"       current behaviour, no extra feedback (default, safe).
+    "telemetry" strong text control: numerical telemetry only, no images.
+    "visual"    telemetry plus a frozen VLM's observations of ordered frames.
+
+The heavy work (rendering frames + VLM inference) runs in a separate batch job
+(observer.sh / src/behavior_observer.py). The evolution controller only reads the
+cache, so it never needs a GPU or the VLM dependencies.
+"""
+FEEDBACK_MODE = os.getenv("LLMGE_FEEDBACK_MODE", "off").strip().lower()
+#: Directory holding cached observation JSON keyed by behaviour cache key.
+FEEDBACK_CACHE_DIR = os.getenv(
+    "LLMGE_FEEDBACK_CACHE_DIR", os.path.join(SOTA_ROOT, "behavior_cache"))
+#: Root directory for captured frames and telemetry, one subdir per parent gene.
+FEEDBACK_CAPTURE_DIR = os.getenv(
+    "LLMGE_FEEDBACK_CAPTURE_DIR", os.path.join(SOTA_ROOT, "behavior_captures"))
+#: Number of ordered frames sent to the observer (split across episodes).
+FEEDBACK_FRAMES = int(os.getenv("LLMGE_FEEDBACK_FRAMES", "16"))
+#: Number of deterministic evaluation rollouts recorded per parent.
+FEEDBACK_EPISODES = int(os.getenv("LLMGE_FEEDBACK_EPISODES", "2"))
+#: Max steps per recorded rollout.
+FEEDBACK_MAX_STEPS = int(os.getenv("LLMGE_FEEDBACK_MAX_STEPS", "1000"))
+#: Reset seeds for captured rollouts are FEEDBACK_SEED_BASE + episode index, so
+#: the capture job and the controller agree on the cache key without sharing
+#: state. The seed list is also recorded in the capture manifest.
+FEEDBACK_SEED_BASE = int(os.getenv("LLMGE_FEEDBACK_SEED_BASE", "1000"))
+#: MuJoCo camera used for rendering. Walker2d's default tracker is "track".
+FEEDBACK_CAMERA = os.getenv("LLMGE_FEEDBACK_CAMERA", "track")
+#: Longest image side in pixels before the observer sees a frame. Bounds the
+#: visual-token budget and therefore inference cost.
+FEEDBACK_IMAGE_MAX_SIDE = int(os.getenv("LLMGE_FEEDBACK_IMAGE_MAX_SIDE", "336"))
+#: Bump when the observer prompt changes; part of the cache key.
+FEEDBACK_PROMPT_REVISION = os.getenv("LLMGE_FEEDBACK_PROMPT_REVISION", "v1")
+#: Per-observation wall-clock budget in seconds, recorded against actuals.
+FEEDBACK_MAX_COST_SECONDS = float(os.getenv("LLMGE_FEEDBACK_MAX_COST_SECONDS", "120"))
+#: If true, a parent without a cached observation is not mutated (the run still
+#: continues with the rest of the batch). If false, mutation proceeds without
+#: feedback and logs a warning, so a missing cache cannot break a run.
+FEEDBACK_REQUIRED = os.getenv("LLMGE_FEEDBACK_REQUIRED", "0").lower() in ("1", "true", "yes")
+
+#: Frozen observer model. Qwen2.5-VL supports multi-image input and a
+#: configurable visual-token budget. The revision is pinned into the cache key.
+OBSERVER_MODEL_ID = os.getenv(
+    "LLMGE_OBSERVER_MODEL_ID", "Qwen/Qwen2.5-VL-7B-Instruct")
+OBSERVER_MODEL_REVISION = os.getenv("LLMGE_OBSERVER_MODEL_REVISION", "main")
+#: Backend used by src/behavior_observer.py: "hf" (transformers) or "mock".
+OBSERVER_BACKEND = os.getenv("LLMGE_OBSERVER_BACKEND", "hf").strip().lower()
+#: Max tokens the observer may generate per observation.
+OBSERVER_MAX_NEW_TOKENS = int(os.getenv("LLMGE_OBSERVER_MAX_NEW_TOKENS", "512"))
+#: Dtype requested from transformers ("bfloat16" or "float16").
+OBSERVER_TORCH_DTYPE = os.getenv("LLMGE_OBSERVER_TORCH_DTYPE", "bfloat16")
 
 """
 Misc. Non-sense

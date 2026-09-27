@@ -57,6 +57,12 @@ sota/ExquisiteNetV2/cifar-10-python/
 *.code-workspace
 mujoco_rl_output
 previous_runs
+pace_vlm_results/
+mujoco_islands_run/
+behavior_captures/
+behavior_cache/
+sota/MujocoRL/behavior_captures/
+sota/MujocoRL/behavior_cache/
 run.sh 
 server.sh
 island_controller.sbatch
