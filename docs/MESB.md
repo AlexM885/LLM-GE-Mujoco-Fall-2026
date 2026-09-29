@@ -4,9 +4,11 @@
 > It does not eliminate the archive resolution choice.**
 
 This branch adds a MESB quality-diversity loop for LLM-guided evolution of PPO
-controllers on HalfCheetah. It is **purely additive**: no existing file on the
-branch was modified. The MESB driver is `run_mesb.py`; the legacy ExquisiteNet
-driver `run_improved.py` is untouched.
+controllers on HalfCheetah. It is built on `origin/Mujoco-ME-Base@6b73ae167`
+("Base Map elites from last semester": HalfCheetah-v4 + PPO + fixed-grid
+MAP-Elites), the same starting point as `shazeb/halfcheetah-xqc`. It is
+**purely additive**: no existing file was modified. The MESB driver is
+`run_mesb.py`; `run_improved.py` (NSGA-II / fixed-grid MAP-Elites) is untouched.
 
 - [1. Problem](#1-problem)
 - [2. Fixed-grid limitation](#2-standard-map-elites-fixed-grid-limitation)
@@ -245,22 +247,40 @@ uninterrupted run.
 
 ## 15. Run commands
 
-Environments: the root uv project runs the driver and the LLM operators
-(`deap`, `google-genai`, …). The ported `sota/MujocoRL/eval_env` uv project
-runs PPO/MuJoCo (`gymnasium[mujoco]`, `stable-baselines3`, Python 3.12).
+Environments (both already in the repo): the root uv project runs the driver,
+the LLM operators and the analysis (`deap`, `transformers`, `matplotlib`, …);
+`sota/MujocoRL/eval_env` runs PPO/MuJoCo (`gymnasium[mujoco]`,
+`stable-baselines3`, Python 3.12).
 
 ```bash
-uv sync                                   # driver + LLM operators
+uv sync                                   # driver + LLM operators + analysis
 uv sync --project sota/MujocoRL/eval_env  # PPO / MuJoCo evaluation
-export GEMINI_API_KEY=...                 # LLM_MODEL='gemini' in src/cfg/constants.py
 EVAL_PY="env -u VIRTUAL_ENV uv run --project sota/MujocoRL/eval_env python"
 ```
+
+**LLM server.** With `LOCAL_LLM = True` (the default in
+`src/cfg/constants_Mujoco.py`), mutation/crossover go to the team's local LLM
+server (`server.py`, Llama-3.3-70B at `MODEL_PATH`). Start it before a real run:
+
+```bash
+mkdir -p mujoco_rl_output/slurm_logs
+sbatch scripts/mesb/llm_server.sbatch   # writes hostname.log; operators wait for it
+```
+
+`scripts/mesb/llm_server.sbatch` is `server.sh` without the island
+controller, listening on `PORT` from the constants (see Appendix B.3). It
+rewrites the tracked `hostname.log`, exactly like `server.sh`; don't commit
+that change. `--llm-backend mock` needs no server.
 
 **Unit and integration tests** (NumPy + DEAP only):
 
 ```bash
 uv run python -m pytest tests/mesb -q
 ```
+
+`tests/mesb/conftest.py` defaults `LLMGE_AUTO_START_SERVER=0`, so the shared
+`tests/conftest.py` does not `sbatch server.sh` just for these tests. Run the
+whole suite (`pytest`) only when you want that server.
 
 **Single-gene PPO smoke test** (about 20 s):
 
@@ -271,8 +291,8 @@ $EVAL_PY sota/MujocoRL/train_gene.py --gene-file sota/MujocoRL/network.py \
     --eval-episodes 2 --eval-max-steps 200
 ```
 
-**Short experiments** (real PPO; 2 generations; a few minutes on 2 CPUs).
-Use `--llm-backend mock` to test without an LLM key:
+**Short experiments** (real PPO; 2–3 generations; a few minutes on 2 CPUs).
+Add `--llm-backend mock` to test without the LLM server:
 
 ```bash
 uv run python run_mesb.py --run-name short_shadow --selection-mode mesb-shadow \
@@ -297,6 +317,10 @@ uv run python run_mesb.py --run-name mesb_full_s0 --selection-mode mesb --seed 0
 The project adaptation (remap once per generation) is the same command plus
 `--mesb-remap-at-generation-end`.
 
+The LLM model name passed to the operators is `--llm-model` (default
+`llama3`, as `ISLAND_LLMS` in `constants_Mujoco.py`; with `LOCAL_LLM` every
+llama/mixtral name goes to the local server).
+
 All CLI options: `uv run python run_mesb.py --help`. Defaults live in
 `src/cfg/constants_mesb.py`, the single source; the resolved values are
 written to `config.json`.
@@ -309,7 +333,8 @@ job's CPUs, one per CPU. No path is hard-coded: the script `cd`s to
 
 ```bash
 cd <your clone>                                   # submit from the repo root
-export GEMINI_API_KEY=...
+mkdir -p mujoco_rl_output/slurm_logs
+sbatch scripts/mesb/llm_server.sbatch             # 2x H200 LLM server (once)
 scripts/mesb/submit_mesb.sh mesb_full_s0 0 mesb   # RUN_NAME SEED SELECTION_MODE
 # overrides via environment variables:
 DIMS_X=20 DIMS_Y=20 REMAP_FREQUENCY=100 PPO_TIMESTEPS=500000 EVAL_EPISODES=10 \
@@ -326,13 +351,13 @@ scripts/mesb/submit_mesb.sh shadow_s0 0 mesb-shadow
 - `BUFFER_CAPACITY`
 - `WORKERS`
 - `EXTRA_ARGS` (any `run_mesb.py` flag)
-- `MESB_ENV_SETUP` (e.g. `"module load anaconda3; conda activate llm_guided_env"`)
+- `MESB_ENV_SETUP` (site setup commands; default `module load uv`)
 - `DRIVER_PYTHON`, `LLM_PYTHON`, `EVAL_PYTHON`
 
 ## 17. Visualisation
 
 ```bash
-uv run --with matplotlib python sota/MujocoRL/analyze_mesb.py \
+uv run python sota/MujocoRL/analyze_mesb.py \
     --run-dir mujoco_rl_output/<run_name>
 ```
 
@@ -362,7 +387,7 @@ an MP4:
 
 ```bash
 RUN=mujoco_rl_output/<run_name>
-BEST=$(uv run --with matplotlib python sota/MujocoRL/analyze_mesb.py --run-dir $RUN --print-best-model)
+BEST=$(uv run python sota/MujocoRL/analyze_mesb.py --run-dir $RUN --print-best-model)
 MUJOCO_GL=egl $EVAL_PY sota/MujocoRL/behavior_eval.py --model "$BEST" \
     --seed 1000 --episodes 10 --max-steps 1000 --video $RUN/videos/best.mp4
 ```
@@ -390,11 +415,18 @@ uv run python run_mesb.py --run-name fixed_s0 --selection-mode mesb \
 uv run python run_mesb.py --run-name mesb_s0  --selection-mode mesb --seed 0 --eval-python "$EVAL_PY"
 ```
 
+`run_improved.py` at this base also runs this fixed grid by default
+(`USE_MAP_ELITES = True`), with the positional-fitness bug and parents drawn
+with replacement via `random.choice`. `run_mesb.py --archive-boundaries fixed`
+is the like-for-like baseline instead, because it shares MESB's evaluation,
+logging and parent sampling. `--selection-mode nsga2` reproduces
+`run_improved.py`'s `USE_MAP_ELITES = False` path.
+
 **Offline replay of any run's evaluations** through both archive types (it
 also works for `nsga2` runs):
 
 ```bash
-uv run --with matplotlib python sota/MujocoRL/analyze_mesb.py \
+uv run python sota/MujocoRL/analyze_mesb.py \
     --run-dir mujoco_rl_output/<run> --compare-fixed -500 2000 0 500
 ```
 
@@ -411,13 +443,14 @@ needed at all is the point of MESB.
 
 - **Resolution is still a hyper-parameter** (`--mesb-dims`). MESB only
   removes the need to choose numeric edges.
-- Real-LLM runs could not be exercised end-to-end here: there was no API
-  key. The wiring through the existing `llm_mutation`/`llm_crossover` was
-  verified with only the network call stubbed. Smoke runs used
-  `--llm-backend mock`, which has no scientific meaning.
-- The LLM path is this branch's (Gemini via `src/llm_utils.py`). The
-  local-vLLM server path from MosesTheRedSea-main was not ported. On PACE,
-  compute nodes need outbound HTTPS for Gemini.
+- The real Llama-3.3 server could not be run here (it needs 2 × H200). The
+  full LLM path (existing `llm_mutation` / `llm_crossover` / `llm_utils`,
+  server wait, HTTP `/generate`) was exercised against a stand-in server
+  speaking `server.py`'s protocol and returning edited code; the real model's
+  output quality is untested. Other smoke runs used `--llm-backend mock`,
+  which has no scientific meaning.
+- Islands (`islands_wrapper.py`, migration) are not integrated; MESB runs a
+  single population.
 - Evaluation runs inside a single Slurm allocation (parallel subprocesses).
   There is no per-gene `sbatch` fan-out.
 - `nsga2` mode stops with an error if fewer than 4 valid individuals remain.
@@ -433,7 +466,9 @@ needed at all is the point of MESB.
 
 ## Appendix A: files
 
-All of these are new; no existing file was changed.
+All of these are new; no existing file was changed. The seed network
+(`sota/MujocoRL/network.py`), `sota/MujocoRL/eval_env/` and `templates/Mujoco/`
+are used as they already are at `6b73ae167`.
 
 | path | purpose |
 |---|---|
@@ -444,13 +479,12 @@ All of these are new; no existing file was changed.
 | `sota/MujocoRL/mesb_evaluator.py` | parallel subprocess evaluation with timeouts; mock evaluator for tests |
 | `sota/MujocoRL/mesb_logging.py` | run-directory layout, CSV/JSONL writers, snapshots |
 | `sota/MujocoRL/analyze_mesb.py` | figures, `summary.md`, fixed-vs-sliding replay |
-| `sota/MujocoRL/network.py`, `eval_env/pyproject.toml` | **verbatim** from `origin/MosesTheRedSea-main` (PPO HalfCheetah seed; eval environment) |
-| `templates/Mujoco/**` | **verbatim** from `origin/MosesTheRedSea-main` |
 | `run_mesb.py` | driver: modes, selection, checkpoints, logging |
 | `src/mesb_variation.py` | driver side of LLM variation (legacy probabilities/temperatures/gene ids) |
 | `src/mesb_llm_operator.py` | subprocess wrapper around the existing LLM operators (+ mock backend) |
 | `src/cfg/constants_mesb.py` | single source of defaults |
 | `scripts/mesb/run_mesb.sbatch`, `scripts/mesb/submit_mesb.sh` | Slurm launch |
+| `scripts/mesb/llm_server.sbatch` | local LLM server on the constants' `PORT`, no island controller |
 | `tests/mesb/*` | 77 tests |
 
 Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
@@ -459,27 +493,32 @@ Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
 
 ## Appendix B: pre-existing bugs found (not fixed in place)
 
-1. **Positional fitness parsing** (on the reference branches, not on this
-   branch). In MosesTheRedSea-main and Mujoco-ME-Base, `train_rl.py` writes
+1. **Positional fitness parsing** (in this branch's `run_improved.py`, and on
+   MosesTheRedSea-main / Mujoco-ME-Base). `train_rl.py` writes
    `mean_reward,std_reward,train_time,param_count,…`. `check4results` keeps
    the first `len(FITNESS_WEIGHTS) == 2` columns. `constants_Mujoco.py`
    documents `(1.0, -1.0)` as *maximise reward, minimise parameter count*,
    but NSGA-II actually **minimised `std_reward`**. `run_mesb.py` reads
    objectives by name (`C.NSGA2_OBJECTIVES`). MESB uses only `mean_reward`.
-2. **Crossover chunk off-by-one**, in `src/llm_crossover.py` on this branch
-   and on MosesTheRedSea-main. Candidates are enumerated over `parts_x[1:]`
+2. **Crossover chunk off-by-one**, in `src/llm_crossover.py` (here, on
+   MosesTheRedSea-main and on `new_main`). Candidates are enumerated over `parts_x[1:]`
    starting from 0, but the LLM output is written to `parts_x[augment_idx]`.
    That is one chunk too early, so it overwrites the import block or the
-   policy class. With a stubbed LLM, 4/4 MuJoCo crossover children from the
-   original function failed to import (`NameError: nn`). The MESB wrapper
+   policy class. Against a stand-in LLM server, 3/3 MuJoCo crossover
+   children from the original function failed to import (`NameError: nn`);
+   3/3 from the corrected version loaded. The MESB wrapper
    defaults to a corrected re-implementation built from the same helpers,
    templates and random-draw order. `--llm-crossover-impl original` calls the
    untouched function.
-3. `ROOT_DIR` in `src/cfg/constants.py` is hard-coded to another user's
-   cluster path. The wrapper overrides it at runtime in the imported modules.
-4. The existing `llm_mutation.py` fills prompts with `str.format`, which
-   breaks on the MuJoCo rules' literal `{"policy_class": ...}`. The wrapper
-   escapes every brace except the `{}` code slot.
+3. **Port mismatch** at `6b73ae167`: `server.sh` starts uvicorn on port
+   8137, while `constants_Mujoco.py` (`PORT = 8169`) makes the operators call
+   8169. Fixed upstream in `6f51a9361`; here `scripts/mesb/llm_server.sbatch`
+   reads `PORT` from the constants instead of editing `server.sh`.
+4. `tests/conftest.py` starts an LLM server (`sbatch server.sh`, which also
+   submits `island_controller.sbatch`) at the start of *any* pytest session,
+   unless `LLMGE_AUTO_START_SERVER=0`.
+5. `hostname.log` is committed although `.gitignore` lists it; every server
+   start rewrites it.
 
 ## Appendix C: verification performed
 
@@ -500,3 +539,8 @@ Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
 - Real-PPO `mesb`, 3 generations: parents were always previous-archive
   elites; remaps at 13, 18 and 23 successful evaluations; boundaries moved;
   resume to generation 4 added no duplicate rows.
+- After rebasing onto `6b73ae167`: 77/77 tests pass (the shared conftest did
+  not start a server), and a 2-generation real-PPO `mesb` run through the
+  existing LLM operators and a stand-in `server.py` made 18 LLM calls
+  (6 create, 6 crossover, 6 mutation), all children loaded, 14/14 trained and
+  evaluated.

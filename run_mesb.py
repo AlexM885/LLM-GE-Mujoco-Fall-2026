@@ -65,7 +65,7 @@ LOCKED_KEYS = (
     "mesb_buffer_capacity", "mesb_remap_at_generation_end", "fixed_ranges", "qd_score_offset",
     "seed", "eval_seed", "env_id", "eval_timesteps", "eval_episodes", "eval_max_steps",
     "start_population_size", "population_size", "num_elites", "crossover_probability",
-    "mutation_probability", "llm_backend", "llm_crossover_impl", "evaluator",
+    "mutation_probability", "llm_backend", "llm_model", "llm_crossover_impl", "evaluator",
 )
 
 
@@ -75,7 +75,7 @@ class CheckpointMismatchError(RuntimeError):
 
 # ============================================================ legacy NSGA-II
 class LegacyNSGA2:
-    """Parent selection exactly as run_improved.py (MosesTheRedSea-main):
+    """Parent selection exactly as run_improved.py (USE_MAP_ELITES = False):
 
     elites  = selSPEA2(valid, num_elites)
     parents = selTournamentDCD(selNSGA2(valid, len(valid)), k)
@@ -164,19 +164,19 @@ def _git(*args: str) -> str | None:
 def _llm_identity() -> dict[str, Any]:
     """Read (without importing torch) which LLM the existing operators use."""
     out: dict[str, Any] = {}
+    keys = ("LLM_MODEL", "MODEL_PATH", "LOCAL_LLM", "PORT")
     try:
-        tree = ast.parse((REPO_ROOT / "src/cfg/constants.py").read_text(encoding="utf-8"))
-        for node in tree.body:
-            if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "LLM_MODEL"
-                                                    for t in node.targets):
-                out["LLM_MODEL"] = ast.literal_eval(node.value)
-    except (OSError, SyntaxError, ValueError):
-        pass
-    try:
-        m = re.search(r'model="([^"]+)"', (REPO_ROOT / "src/llm_utils.py").read_text())
-        if m:
-            out["gemini_model"] = m.group(1)
-    except OSError:
+        path = (REPO_ROOT / "src/cfg/constants.py").resolve()
+        out["constants_file"] = path.name
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if getattr(t, "id", None) in keys:
+                        try:
+                            out[t.id] = ast.literal_eval(node.value)
+                        except ValueError:
+                            out[t.id] = ast.unparse(node.value)
+    except (OSError, SyntaxError):
         pass
     return out
 
@@ -216,7 +216,7 @@ class MESBRun:
         self.variation = Variation(self.paths.genes, self.paths.prompts, self.paths.llm_logs,
                                    backend=c["llm_backend"], python_cmd=c["llm_python"],
                                    timeout_sec=c["llm_timeout"],
-                                   inference_submission=c["inference_submission"],
+                                   llm_model=c["llm_model"],
                                    crossover_impl=c["llm_crossover_impl"])
         self.evaluator = make_evaluator(c["evaluator"], EvalSettings(
             env_id=c["env_id"], timesteps=c["eval_timesteps"], episodes=c["eval_episodes"],
@@ -233,7 +233,8 @@ class MESBRun:
             "objective": "mean_reward",
             "descriptors": ["mean_distance", "mean_control_cost"],
             "archive_seed": self.cfg["seed"],
-            "llm": {"backend": self.cfg["llm_backend"], **_llm_identity()},
+            "llm": {"backend": self.cfg["llm_backend"], "llm_model": self.cfg["llm_model"],
+                    **_llm_identity()},
             "seeds": {"python_random": self.cfg["seed"], "numpy_global": self.cfg["seed"],
                       "archive_rng": self.cfg["seed"],
                       "ppo_train_seed": "seed * 1_000_000 + evaluation_index (per gene)",
@@ -565,7 +566,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "'mock' = LLM-free edits for plumbing tests only")
     g.add_argument("--llm-python", default=sys.executable)
     g.add_argument("--llm-timeout", type=float, default=C.LLM_TIMEOUT_SEC)
-    g.add_argument("--inference-submission", type=int, choices=[0, 1], default=1)
+    g.add_argument("--llm-model", default=C.LLM_MODEL,
+                   help="Model name passed to the existing operators (run_improved.py --llm_model)")
     g.add_argument("--llm-crossover-impl", choices=["fixed", "original"], default="fixed",
                    help="'original' = src/llm_crossover.py unchanged (off-by-one chunk bug)")
     return p
@@ -575,7 +577,6 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
     cfg = {k: v for k, v in vars(args).items() if k not in ("resume",)}
     cfg["run_name"] = args.run_name or _dt.datetime.now().strftime("mesb_%Y%m%d_%H%M%S")
     cfg["mesb_dims"] = list(args.mesb_dims)
-    cfg["inference_submission"] = bool(args.inference_submission)
     if args.archive_boundaries == "fixed":
         if args.fixed_ranges is None:
             raise SystemExit("--archive-boundaries fixed needs --fixed-ranges DIST_LO DIST_HI "

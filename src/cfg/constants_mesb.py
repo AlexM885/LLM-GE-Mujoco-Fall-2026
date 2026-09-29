@@ -3,7 +3,7 @@
 This is the single source of defaults; every value can be overridden on the
 ``run_mesb.py`` command line, and the resolved values are written to
 ``<run_dir>/config.json``. Evolution defaults mirror
-``src/cfg/constants_Mujoco.py`` on origin/MosesTheRedSea-main so that MESB
+``src/cfg/constants_Mujoco.py`` (this branch's base, 6b73ae167) so that MESB
 and the legacy NSGA-II loop differ only in what the experiment varies.
 
 Deliberately free of torch / gymnasium imports so the driver stays light.
@@ -18,7 +18,7 @@ SOTA_ROOT = ROOT_DIR / "sota" / "MujocoRL"
 SEED_NETWORK = SOTA_ROOT / "network.py"
 TRAIN_SCRIPT = SOTA_ROOT / "train_gene.py"
 LLM_OPERATOR_SCRIPT = ROOT_DIR / "src" / "mesb_llm_operator.py"
-#: Prompt templates (ported verbatim from origin/MosesTheRedSea-main).
+#: Prompt templates (the existing MuJoCo prompts used by run_improved.py).
 MUTATION_PROMPT_GLOB = "templates/Mujoco/Normal/*.txt"
 CONSTANT_RULES_PATH = "templates/Mujoco/ConstantRules.txt"
 #: Centralised output location (same name as OUTPUT_DIR in constants_Mujoco.py).
@@ -50,6 +50,9 @@ CREATE_TEMPERATURE = (0.05, 0.4)
 CROSSOVER_TEMPERATURE = (0.05, 0.1)
 MUTATION_TEMPERATURE = (0.02, 0.35)
 LLM_TIMEOUT_SEC = 30 * 60
+#: Model name handed to the existing operators, like run_improved.py's
+#: --llm_model (ISLAND_LLMS[0] in constants_Mujoco.py; served by server.py).
+LLM_MODEL = "llama3"
 
 #: Legacy NSGA-II objectives, read by *name* from the result JSON:
 #: maximise mean_reward, minimise param_count (the documented intent of
@@ -69,7 +72,7 @@ MESB_BUFFER_CAPACITY = None
 MESB_REMAP_AT_GENERATION_END = False
 #: Optional offset for the shifted QD score; raw QD score is always logged.
 MESB_QD_SCORE_OFFSET = None
-#: Fixed-grid baseline ranges from origin/Mujoco-ME-Base@6b73ae167. Only used
+#: Fixed-grid ranges of run_improved.py's MAP-Elites (MAP_ELITES_DESCRIPTORS). Only used
 #: with --archive-boundaries fixed. NOTE: that commit's control cost was a
 #: per-step mean; ours is a per-episode total (see docs/MESB.md), so choose
 #: ranges for the fixed baseline explicitly.

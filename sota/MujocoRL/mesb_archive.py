@@ -597,7 +597,7 @@ class SlidingBoundariesArchive:
 class FixedGridArchive(SlidingBoundariesArchive):
     """Conventional fixed-grid MAP-Elites, for controlled comparison only.
 
-    Reproduces ``get_bin`` from commit 6b73ae167 on origin/Mujoco-ME-Base:
+    Reproduces ``get_bin`` in run_improved.py (commit 6b73ae167):
     ``B`` equal-width bins over a manually specified ``[lo, hi]`` per
     dimension, out-of-range values clipped into the edge bins::
 
