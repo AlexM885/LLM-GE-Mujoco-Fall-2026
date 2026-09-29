@@ -4,10 +4,17 @@ These tests need only NumPy (plus DEAP for the shadow/full-mode integration
 tests, which skip themselves if it is missing). No MuJoCo, PPO or LLM.
 """
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# tests/conftest.py (shared, not modified here) starts an LLM server at session
+# start - on a Slurm cluster via `sbatch server.sh` (2 GPUs). The MESB tests use
+# no LLM, so when they are run on their own (`pytest tests/mesb`) default that
+# off. An explicit LLMGE_AUTO_START_SERVER in the environment still wins.
+os.environ.setdefault("LLMGE_AUTO_START_SERVER", "0")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:

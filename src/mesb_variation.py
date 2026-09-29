@@ -53,7 +53,7 @@ class Variation:
 
     def __init__(self, genes_dir: Path, prompts_dir: Path, log_dir: Path, backend: str = "llm",
                  python_cmd: str = sys.executable, timeout_sec: float = C.LLM_TIMEOUT_SEC,
-                 top_p: float = C.TOP_P, inference_submission: bool = True,
+                 top_p: float = C.TOP_P, llm_model: str = C.LLM_MODEL,
                  crossover_impl: str = "fixed") -> None:
         self.genes_dir = Path(genes_dir)
         self.prompts_dir = Path(prompts_dir)
@@ -62,7 +62,7 @@ class Variation:
         self.python_cmd = python_cmd
         self.timeout_sec = timeout_sec
         self.top_p = top_p
-        self.inference_submission = inference_submission
+        self.llm_model = llm_model
         self.crossover_impl = crossover_impl
         self.templates = sorted((C.ROOT_DIR).glob(C.MUTATION_PROMPT_GLOB))
         if not self.templates:
@@ -81,7 +81,7 @@ class Variation:
     def _call(self, args: list[str], log_name: str) -> str | None:
         cmd = shlex.split(self.python_cmd) + [str(C.LLM_OPERATOR_SCRIPT)] + args + [
             "--backend", self.backend, "--top-p", str(self.top_p),
-            "--inference-submission", str(int(self.inference_submission))]
+            "--llm-model", self.llm_model]
         log_path = self.log_dir / log_name
         try:
             with open(log_path, "w", encoding="utf-8") as log:

@@ -1,24 +1,25 @@
 """Run one LLM variation operator for the MESB driver (subprocess entry point).
 
-``run_mesb.py`` calls this script once per mutation / crossover, in the same
-way ``run_improved.py`` shells out to ``src/llm_mutation.py`` and
+``run_mesb.py`` calls this script once per mutation / crossover, the same way
+``run_improved.py`` shells out to ``src/llm_mutation.py`` and
 ``src/llm_crossover.py``.
 
 Backends
 --------
 ``llm`` (default)
     Re-uses the project's existing operators *unchanged*:
-    ``llm_mutation.augment_network`` and ``llm_crossover.augment_network``
-    (and therefore ``llm_utils.generate_augmented_code`` with the model set
-    by ``LLM_MODEL`` in ``src/cfg/constants.py``). Two things are adapted
-    here at runtime, without editing those files:
+    ``llm_mutation.augment_network`` (prompt filling, FORBIDDEN_PATTERNS
+    validation, parent-chunk fallback) and ``llm_utils.generate_augmented_code``
+    with the model chosen by ``--llm-model``. With ``LOCAL_LLM = True`` in
+    ``src/cfg/constants_Mujoco.py`` this talks to the team's local LLM server
+    (``server.py``), located through ``hostname.log`` and ``PORT``; the
+    operator waits for that server exactly like ``run_improved.py`` does.
 
-    * ``ROOT_DIR`` in ``src/cfg/constants.py`` is a hard-coded cluster path;
-      it is overridden in the imported modules with the real repository root.
-    * The existing ``llm_mutation`` fills its prompt with ``str.format``.
-      The MuJoCo prompts contain literal braces (e.g. ``{"policy_class": ...}``),
-      so all braces except the single ``{}`` code placeholder are escaped
-      before the prompt is handed over.
+    Crossover: ``--crossover-impl original`` calls
+    ``llm_crossover.augment_network`` unchanged. The default ``fixed`` performs
+    the same steps with the same helpers and random-draw order, but writes the
+    LLM output back to the chunk that was shown to the LLM (the original is
+    off by one; see ``llm_crossover`` below and docs/MESB.md).
 
 ``mock``
     Deterministic, LLM-free edits of the seed-network hyper-parameters. For
@@ -27,18 +28,21 @@ Backends
 Examples::
 
     python src/mesb_llm_operator.py mutate --input P.py --output C.py \
-        --prompt-file prompt.txt --temperature 0.2 --seed 7
+        --prompt-file prompt.txt --temperature 0.2 --seed 7 --llm-model llama3
     python src/mesb_llm_operator.py crossover --input P1.py --input-y P2.py \
-        --output C.py --temperature 0.07 --seed 8
+        --output C.py --temperature 0.07 --seed 8 --llm-model llama3
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import re
 import sys
-import tempfile
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,27 +51,41 @@ SPLIT_MARKER = "# --OPTION--"
 
 
 # ------------------------------------------------------------------ helpers
-def escape_for_format(prompt: str) -> str:
-    """Escape braces so ``prompt.format(code)`` only fills the ``{}`` slot."""
-    if "{}" not in prompt:
-        raise ValueError("prompt must contain exactly one literal {} code placeholder")
-    head, tail = prompt.split("{}", 1)
-    esc = lambda s: s.replace("{", "{{").replace("}", "}}")  # noqa: E731
-    return esc(head) + "{}" + esc(tail)
-
-
 def _import_existing_operators():
-    """Import the project's LLM modules and point them at the real repo root."""
+    """Import the project's (unmodified) LLM modules."""
     if str(SRC_DIR) not in sys.path:
         sys.path.insert(0, str(SRC_DIR))
-    import cfg.constants as constants  # noqa: E402  (existing module, unchanged)
-    constants.ROOT_DIR = str(REPO_ROOT)
+    import cfg.constants as constants  # noqa: E402
     import llm_crossover  # noqa: E402
     import llm_mutation  # noqa: E402
-    import llm_utils  # noqa: E402
-    for module in (llm_mutation, llm_crossover, llm_utils):
-        module.ROOT_DIR = str(REPO_ROOT)
     return llm_mutation, llm_crossover, constants
+
+
+def wait_for_llm_server(constants, timeout: float, interval: float = 10.0) -> None:
+    """Block until the local LLM server answers, mirroring run_improved.py.
+
+    No-op when ``LOCAL_LLM`` is False (remote/API models).
+    """
+    if not getattr(constants, "LOCAL_LLM", False):
+        return
+    host_file = Path(constants.HOSTNAME_DIR)
+    start, last = time.time(), None
+    while time.time() - start <= timeout:
+        host = host_file.read_text().strip() if host_file.exists() else ""
+        if host:
+            url = f"http://{host}:{constants.PORT}/"
+            try:
+                with urllib.request.urlopen(url, timeout=5) as resp:
+                    if 200 <= resp.status < 300:
+                        print(f"LLM server ready at {url}", flush=True)
+                        return
+            except (urllib.error.URLError, TimeoutError, OSError) as err:
+                last = err
+        print(f"Waiting for LLM server ({round(time.time() - start)}s/{timeout:.0f}s, "
+              f"host file {host_file})", flush=True)
+        time.sleep(interval)
+    raise TimeoutError(f"LLM server not ready after {timeout:.0f}s (last error: {last}). "
+                       "Start it with scripts/mesb/llm_server.sbatch")
 
 
 def _seed(seed: int) -> None:
@@ -76,42 +94,42 @@ def _seed(seed: int) -> None:
     np.random.seed(seed % (2 ** 32))
 
 
+def _banner(constants, args) -> None:
+    print(f"LLM backend: llm_model={args.llm_model} LOCAL_LLM="
+          f"{getattr(constants, 'LOCAL_LLM', '?')} MODEL_PATH={getattr(constants, 'MODEL_PATH', '?')}",
+          flush=True)
+
+
 # ------------------------------------------------------------------ LLM backend
 def llm_mutate(args: argparse.Namespace) -> None:
     llm_mutation, _, constants = _import_existing_operators()
-    print(f"LLM backend: LLM_MODEL={getattr(constants, 'LLM_MODEL', '?')} "
-          f"inference_submission={args.inference_submission}", flush=True)
-    prompt = Path(args.prompt_file).read_text(encoding="utf-8")
-    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
-        fh.write(escape_for_format(prompt))
-        escaped_path = fh.name
+    _banner(constants, args)
+    wait_for_llm_server(constants, args.server_timeout)
     _seed(args.seed)
+    # llm_mutation fills the literal "{}" with str.replace, so the prompt file
+    # is passed through as-is (absolute path; os.path.join keeps it absolute).
     llm_mutation.augment_network(
-        input_filename=args.input, output_filename=args.output, template_txt=escaped_path,
-        top_p=args.top_p, temperature=args.temperature, apply_quality_control=False,
-        inference_submission=args.inference_submission)
+        input_filename=args.input, output_filename=args.output,
+        template_txt=str(Path(args.prompt_file).resolve()), top_p=args.top_p,
+        llm_model=args.llm_model, temperature=args.temperature, apply_quality_control=False)
 
 
 def llm_crossover(args: argparse.Namespace) -> None:
     """LLM crossover using the existing templates and helpers.
 
-    ``--crossover-impl original`` calls ``llm_crossover.augment_network``
-    unchanged. The default, ``fixed``, performs the same steps in the same
-    random-draw order but writes the LLM output back to the chunk that was
-    actually shown to the LLM. The original enumerates ``parts_x[1:]`` from 0
-    and then writes ``parts_x[augment_idx]``, i.e. one chunk too early, which
-    overwrites the import block (or the policy class) of MuJoCo genes.
+    The original enumerates ``parts_x[1:]`` from 0 and then writes
+    ``parts_x[augment_idx]``, i.e. one chunk before the one it showed the
+    LLM, overwriting the import block (or policy class) of MuJoCo genes.
     """
     _, xmod, constants = _import_existing_operators()
-    print(f"LLM backend: LLM_MODEL={getattr(constants, 'LLM_MODEL', '?')} "
-          f"inference_submission={args.inference_submission} "
-          f"crossover_impl={args.crossover_impl}", flush=True)
+    _banner(constants, args)
+    wait_for_llm_server(constants, args.server_timeout)
     _seed(args.seed)
     if args.crossover_impl == "original":
         xmod.augment_network(
             input_filename_x=args.input, input_filename_y=args.input_y,
-            output_filename=args.output, top_p=args.top_p, temperature=args.temperature,
-            apply_quality_control=False, inference_submission=args.inference_submission)
+            output_filename=args.output, top_p=args.top_p, llm_model=args.llm_model,
+            temperature=args.temperature, apply_quality_control=False)
         return
     parts_x = xmod.split_file(args.input)
     parts_y = xmod.split_file(args.input_y)
@@ -124,8 +142,9 @@ def llm_crossover(args: argparse.Namespace) -> None:
     template_txt = (REPO_ROOT / "templates" / "CrossOver" / template_fname).read_text()
     txt2llm = template_txt.format(x.strip(), y.strip())
     code_from_llm = xmod.generate_augmented_code(
-        txt2llm, augment_idx - 1, False, args.top_p, args.temperature,
-        inference_submission=args.inference_submission)
+        txt2llm, augment_idx - 1, False, args.top_p, args.llm_model, args.temperature)
+    if not code_from_llm:  # same fallback as the original
+        code_from_llm = txt2llm
     note_txt = xmod.extract_note(parts_x[augment_idx])
     parts_x[augment_idx] = f"\n{note_txt}{code_from_llm}\n"
     xmod.write_augmented_code(args.output, parts_x, parts_y)
@@ -185,17 +204,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-p", type=float, default=0.1)
     p.add_argument("--temperature", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--inference-submission", type=int, choices=[0, 1], default=1,
-                   help="1: remote/API LLM (existing default); 0: local transformers model")
+    p.add_argument("--llm-model", default="llama3",
+                   help="Passed to llm_utils.get_llm_code_generator (as run_improved.py --llm_model)")
+    p.add_argument("--server-timeout", type=float,
+                   default=float(os.getenv("LLM_SERVER_READY_TIMEOUT", "3600")),
+                   help="Seconds to wait for the local LLM server")
     p.add_argument("--crossover-impl", choices=["fixed", "original"], default="fixed",
-                   help="'original' calls src/llm_crossover.py unchanged (has an off-by-one "
-                        "chunk index, see docs/MESB.md)")
+                   help="'original' calls src/llm_crossover.py unchanged (off-by-one chunk index)")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    args.inference_submission = bool(args.inference_submission)
     if args.operator == "crossover" and not args.input_y:
         raise SystemExit("crossover needs --input-y")
     if args.operator == "mutate" and args.backend == "llm" and not args.prompt_file:

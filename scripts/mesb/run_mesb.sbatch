@@ -9,9 +9,10 @@
 # ---------------------------------------------------------------------------
 # One Slurm job runs the whole MESB evolution. Gene evaluations (PPO on
 # HalfCheetah, CPU-bound) run in parallel inside the allocation, one per CPU
-# (--workers = SLURM_CPUS_PER_TASK). No GPU is needed for PPO+MLP; the LLM
-# operators use whatever src/cfg/constants.py selects (Gemini API by default,
-# so GEMINI_API_KEY must be set and the node needs outbound HTTPS).
+# (--workers = SLURM_CPUS_PER_TASK). No GPU is needed for PPO+MLP. The LLM
+# operators use the team's local LLM server (LOCAL_LLM in constants_Mujoco.py):
+# start it first with scripts/mesb/llm_server.sbatch; the operators wait for it
+# through hostname.log. (Not needed with EXTRA_ARGS="--llm-backend mock".)
 #
 # Submit with scripts/mesb/submit_mesb.sh (creates the log dir first), or:
 #   mkdir -p mujoco_rl_output/slurm_logs
@@ -39,7 +40,8 @@ WORKERS="${WORKERS:-${SLURM_CPUS_PER_TASK:-1}}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"                      # e.g. "--mesb-remap-at-generation-end"
 
 # Python commands. Defaults use the two uv projects already in the repo:
-# the root project (LLM operators, DEAP) and sota/MujocoRL/eval_env (MuJoCo, SB3).
+# the root project (driver, LLM operators, DEAP, matplotlib) and
+# sota/MujocoRL/eval_env (MuJoCo, SB3).
 DRIVER_PYTHON="${DRIVER_PYTHON:-uv run python}"
 LLM_PYTHON="${LLM_PYTHON:-uv run python}"
 EVAL_PYTHON="${EVAL_PYTHON:-env -u VIRTUAL_ENV uv run --project sota/MujocoRL/eval_env python}"
@@ -78,6 +80,5 @@ $DRIVER_PYTHON run_mesb.py \
     --eval-python "$EVAL_PYTHON" \
     $RESUME $EXTRA_ARGS
 
-$DRIVER_PYTHON -c "import matplotlib" 2>/dev/null && ANALYZE="$DRIVER_PYTHON" || ANALYZE="uv run --with matplotlib python"
-$ANALYZE sota/MujocoRL/analyze_mesb.py --run-dir "mujoco_rl_output/${RUN_NAME}" || \
+$DRIVER_PYTHON sota/MujocoRL/analyze_mesb.py --run-dir "mujoco_rl_output/${RUN_NAME}" || \
     echo "analysis failed; rerun analyze_mesb.py manually"
