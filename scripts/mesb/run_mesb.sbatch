@@ -14,6 +14,9 @@
 # start it first with scripts/mesb/llm_server.sbatch; the operators wait for it
 # through hostname.log. (Not needed with EXTRA_ARGS="--llm-backend mock".)
 #
+# For runs longer than 16 h: CHAIN=N scripts/mesb/submit_mesb.sh ... queues N
+# jobs back to back, each resuming from the last checkpoint.
+#
 # Submit with scripts/mesb/submit_mesb.sh (creates the log dir first), or:
 #   mkdir -p mujoco_rl_output/slurm_logs
 #   sbatch --export=ALL,RUN_NAME=mesb_s0,SEED=0 scripts/mesb/run_mesb.sbatch
@@ -37,6 +40,8 @@ EVAL_EPISODES="${EVAL_EPISODES:-10}"
 EVAL_MAX_STEPS="${EVAL_MAX_STEPS:-1000}"
 NUM_GENERATIONS="${NUM_GENERATIONS:-30}"
 WORKERS="${WORKERS:-${SLURM_CPUS_PER_TASK:-1}}"
+LLM_WORKERS="${LLM_WORKERS:-8}"                  # concurrent LLM calls (server batches them)
+export LLM_SERVER_READY_TIMEOUT="${LLM_SERVER_READY_TIMEOUT:-14400}"  # wait for a restarted server
 EXTRA_ARGS="${EXTRA_ARGS:-}"                      # e.g. "--mesb-remap-at-generation-end"
 
 # Python commands. Defaults use the two uv projects already in the repo:
@@ -76,6 +81,7 @@ $DRIVER_PYTHON run_mesb.py \
     --eval-max-steps "$EVAL_MAX_STEPS" \
     --num-generations "$NUM_GENERATIONS" \
     --workers "$WORKERS" \
+    --llm-workers "$LLM_WORKERS" \
     --llm-python "$LLM_PYTHON" \
     --eval-python "$EVAL_PYTHON" \
     $RESUME $EXTRA_ARGS

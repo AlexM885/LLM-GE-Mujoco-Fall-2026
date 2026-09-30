@@ -337,6 +337,10 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     run_dir = Path(args.run_dir)
+    if not (run_dir / "config.json").exists():
+        print(f"error: {run_dir} is not a MESB run directory (no config.json). "
+              "Did the run start? Check the run name with: ls mujoco_rl_output", file=sys.stderr)
+        return 2
     if args.print_best_model:
         path = best_model_path(load_run(run_dir))
         if path is None:

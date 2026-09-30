@@ -15,6 +15,21 @@ Backends
     (``server.py``), located through ``hostname.log`` and ``PORT``; the
     operator waits for that server exactly like ``run_improved.py`` does.
 
+    Two runtime guards are installed around the (unmodified) team code:
+
+    * ``llm_utils.clean_code_from_llm`` is replaced by
+      ``mesb_llm_guard.extract_code``, which skips placeholder blocks such as
+      ``[modified code]`` instead of always taking the first fenced block
+      (``--extraction original`` keeps the team's function).
+    * the code generator returned by ``llm_utils.get_llm_code_generator`` is
+      wrapped so that an empty reply (server restarted, 8-hour job limit)
+      waits for the replacement server and retries.
+
+    Every finished child - any backend - is then checked with
+    ``mesb_llm_guard.validate_child``. An invalid child is renamed to
+    ``*.rejected.py`` and the operator exits with code 3, so the driver keeps
+    the parent, exactly as run_improved.py does for a failed LLM job.
+
     Crossover: ``--crossover-impl original`` calls
     ``llm_crossover.augment_network`` unchanged. The default ``fixed`` performs
     the same steps with the same helpers and random-draw order, but writes the
@@ -48,6 +63,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
 SPLIT_MARKER = "# --OPTION--"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from mesb_llm_guard import extract_code, validate_child  # noqa: E402
+
+#: Exit code for "LLM answered, but the child network is unusable".
+EXIT_INVALID_CHILD = 3
 
 
 # ------------------------------------------------------------------ helpers
@@ -88,6 +110,33 @@ def wait_for_llm_server(constants, timeout: float, interval: float = 10.0) -> No
                        "Start it with scripts/mesb/llm_server.sbatch")
 
 
+def _install_guards(constants, args: argparse.Namespace) -> None:
+    """Patch llm_utils at runtime (see module docstring); the file is untouched."""
+    import llm_utils  # noqa: E402  (already imported by llm_mutation/llm_crossover)
+    if args.extraction == "robust":
+        llm_utils.clean_code_from_llm = extract_code
+    original_factory = llm_utils.get_llm_code_generator
+
+    def factory(llm_model):
+        generator, qc_func = original_factory(llm_model)
+
+        def generate_with_retry(prompt, **kwargs):
+            out = None
+            for attempt in range(1, args.llm_retries + 1):
+                out = generator(prompt, **kwargs)
+                text = out[0] if isinstance(out, tuple) else out
+                if isinstance(text, str) and text.strip():
+                    return out
+                print(f"LLM returned no text (attempt {attempt}/{args.llm_retries}); "
+                      "waiting for the LLM server before retrying", flush=True)
+                if attempt < args.llm_retries:
+                    wait_for_llm_server(constants, args.server_timeout)
+            return out
+        return generate_with_retry, qc_func
+
+    llm_utils.get_llm_code_generator = factory
+
+
 def _seed(seed: int) -> None:
     import numpy as np
     random.seed(seed)
@@ -104,6 +153,7 @@ def _banner(constants, args) -> None:
 def llm_mutate(args: argparse.Namespace) -> None:
     llm_mutation, _, constants = _import_existing_operators()
     _banner(constants, args)
+    _install_guards(constants, args)
     wait_for_llm_server(constants, args.server_timeout)
     _seed(args.seed)
     # llm_mutation fills the literal "{}" with str.replace, so the prompt file
@@ -123,6 +173,7 @@ def llm_crossover(args: argparse.Namespace) -> None:
     """
     _, xmod, constants = _import_existing_operators()
     _banner(constants, args)
+    _install_guards(constants, args)
     wait_for_llm_server(constants, args.server_timeout)
     _seed(args.seed)
     if args.crossover_impl == "original":
@@ -175,7 +226,10 @@ def mock_mutate(args: argparse.Namespace) -> None:
     rng = random.Random(args.seed)
     code = Path(args.input).read_text(encoding="utf-8")
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output).write_text(mock_mutate_text(code, rng), encoding="utf-8")
+    child = mock_mutate_text(code, rng)
+    if "MOCK_INVALID_CHILD" in code:  # test hook: imitate an LLM placeholder reply
+        child = child.replace("def get_ppo_kwargs", "ERROR\ndef _gone")
+    Path(args.output).write_text(child, encoding="utf-8")
     print("Job Done")
 
 
@@ -207,8 +261,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--llm-model", default="llama3",
                    help="Passed to llm_utils.get_llm_code_generator (as run_improved.py --llm_model)")
     p.add_argument("--server-timeout", type=float,
-                   default=float(os.getenv("LLM_SERVER_READY_TIMEOUT", "3600")),
-                   help="Seconds to wait for the local LLM server")
+                   default=float(os.getenv("LLM_SERVER_READY_TIMEOUT", str(4 * 3600))),
+                   help="Seconds to wait for the local LLM server (covers a server restart)")
+    p.add_argument("--llm-retries", type=int, default=3,
+                   help="Attempts per request when the server returns nothing")
+    p.add_argument("--extraction", choices=["robust", "original"], default="robust",
+                   help="'original' keeps llm_utils.clean_code_from_llm (first code block)")
+    p.add_argument("--no-validate", action="store_true",
+                   help="Skip the child check (not recommended)")
     p.add_argument("--crossover-impl", choices=["fixed", "original"], default="fixed",
                    help="'original' calls src/llm_crossover.py unchanged (off-by-one chunk index)")
     return p
@@ -223,9 +283,19 @@ def main(argv: list[str] | None = None) -> int:
     fn = {("mutate", "llm"): llm_mutate, ("crossover", "llm"): llm_crossover,
           ("mutate", "mock"): mock_mutate, ("crossover", "mock"): mock_crossover}
     fn[(args.operator, args.backend)](args)
-    if not Path(args.output).exists():
+    out = Path(args.output)
+    if not out.exists():
         print(f"operator finished but {args.output} was not written", file=sys.stderr)
         return 2
+    if args.no_validate:
+        return 0
+    ok, reason, info = validate_child(out)
+    if not ok:
+        rejected = out.with_name(out.stem + ".rejected.py")
+        out.replace(rejected)
+        print(f"INVALID CHILD: {reason} (kept as {rejected.name})", flush=True)
+        return EXIT_INVALID_CHILD
+    print(f"CHILD OK duplicate_definitions={info.get('duplicate_definitions', [])}", flush=True)
     return 0
 
 
