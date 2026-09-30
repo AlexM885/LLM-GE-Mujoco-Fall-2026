@@ -217,7 +217,8 @@ class MESBRun:
                                    backend=c["llm_backend"], python_cmd=c["llm_python"],
                                    timeout_sec=c["llm_timeout"],
                                    llm_model=c["llm_model"],
-                                   crossover_impl=c["llm_crossover_impl"])
+                                   crossover_impl=c["llm_crossover_impl"],
+                                   workers=c["llm_workers"])
         self.evaluator = make_evaluator(c["evaluator"], EvalSettings(
             env_id=c["env_id"], timesteps=c["eval_timesteps"], episodes=c["eval_episodes"],
             max_steps=c["eval_max_steps"], eval_seed=c["eval_seed"], device=c["device"],
@@ -318,7 +319,7 @@ class MESBRun:
 
     def make_plan(self, generation: int) -> GenerationPlan:
         if generation == 0:
-            results = [self.variation.create() for _ in range(self.cfg["start_population_size"])]
+            results = self.variation.create_many(self.cfg["start_population_size"])
             parents, elites, slots = [], [], [r.gene_id for r in results]
         else:
             parents, elites = self._select_parents()
@@ -471,6 +472,14 @@ class MESBRun:
             msg += (f" | archive {metrics['occupied_cells']}/{metrics['total_cells']} "
                     f"({100 * metrics['coverage']:.1f}%), QD {metrics['raw_qd_score']:.1f}, "
                     f"remaps {metrics['number_of_remaps']}")
+        calls = plan.variation
+        if calls:
+            invalid = sum(1 for v in calls if (v.get("error") or "").startswith("INVALID CHILD"))
+            secs = [v["seconds"] for v in calls if v.get("seconds") is not None]
+            msg += (f" | LLM {len(calls)} calls, {sum(not v['ok'] for v in calls)} failed "
+                    f"({invalid} invalid child)")
+            if secs:
+                msg += f", {sum(secs) / len(secs):.0f}s avg / {max(secs):.0f}s max per call"
         print(msg, flush=True)
 
     # ---------------------------------------------------------- main loop
@@ -566,6 +575,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "'mock' = LLM-free edits for plumbing tests only")
     g.add_argument("--llm-python", default=sys.executable)
     g.add_argument("--llm-timeout", type=float, default=C.LLM_TIMEOUT_SEC)
+    g.add_argument("--llm-workers", type=int, default=C.LLM_WORKERS,
+                   help="Concurrent LLM operator calls (results do not depend on this)")
     g.add_argument("--llm-model", default=C.LLM_MODEL,
                    help="Model name passed to the existing operators (run_improved.py --llm_model)")
     g.add_argument("--llm-crossover-impl", choices=["fixed", "original"], default="fixed",

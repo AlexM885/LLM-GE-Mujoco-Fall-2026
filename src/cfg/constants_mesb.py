@@ -49,7 +49,12 @@ TOP_P = 0.1
 CREATE_TEMPERATURE = (0.05, 0.4)
 CROSSOVER_TEMPERATURE = (0.05, 0.1)
 MUTATION_TEMPERATURE = (0.02, 0.35)
-LLM_TIMEOUT_SEC = 30 * 60
+#: Wall-clock limit per LLM operator call. Generous on purpose: a call waits
+#: (up to LLM_SERVER_READY_TIMEOUT, 4 h by default) for a replacement server
+#: when the 8-hour LLM server job ends mid-run.
+LLM_TIMEOUT_SEC = 5 * 60 * 60
+#: LLM operator calls run concurrently (the server batches requests).
+LLM_WORKERS = 8
 #: Model name handed to the existing operators, like run_improved.py's
 #: --llm_model (ISLAND_LLMS[0] in constants_Mujoco.py; served by server.py).
 LLM_MODEL = "llama3"

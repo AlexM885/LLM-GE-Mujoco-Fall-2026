@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=mesb-llm-server
-#SBATCH -t 16:00:00
+#SBATCH -t 8:00:00
 #SBATCH --nodes=1
 #SBATCH -G 2
 #SBATCH -C "H200"
@@ -14,9 +14,13 @@
 #   * it listens on PORT from src/cfg/constants_Mujoco.py (server.sh at this
 #     commit hard-codes 8137 while the constants say 8169; see docs/MESB.md);
 #   * it never submits island_controller.sbatch.
+# 8 hours is the longest a 2-GPU job may run under the GPU QOS (a longer
+# request waits forever with QOSMaxGRESMinutesPerJob). For longer runs use
+# scripts/mesb/start_llm_server.sh N to queue N servers back to back.
 # It writes the node name to hostname.log, which the LLM operators read.
 #
 #   mkdir -p mujoco_rl_output/slurm_logs && sbatch scripts/mesb/llm_server.sbatch
+#   scripts/mesb/start_llm_server.sh 3        # 3 x 8 h, back to back
 # ---------------------------------------------------------------------------
 set -euo pipefail
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)}"

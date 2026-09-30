@@ -272,6 +272,49 @@ controller, listening on `PORT` from the constants (see Appendix B.3). It
 rewrites the tracked `hostname.log`, exactly like `server.sh`; don't commit
 that change. `--llm-backend mock` needs no server.
 
+The server job asks for 8 hours, the most the GPU QOS allows for a 2-GPU job
+(a longer request stays pending with `QOSMaxGRESMinutesPerJob`). For a longer
+run, queue several servers back to back:
+
+```bash
+scripts/mesb/start_llm_server.sh 3   # 3 x 8 h, each starts when the previous ends
+```
+
+**How MESB calls the LLM.** The wrapper (`src/mesb_llm_operator.py`) still
+calls the team's `llm_mutation` / `llm_crossover` / `llm_utils` unchanged, but
+adds three guards around them (in `src/mesb_llm_guard.py`):
+
+1. **Code extraction.** `llm_utils.clean_code_from_llm` keeps the *first*
+   fenced block. Llama-3.3 often answers with a placeholder block
+   (`[modified code]`) or a usage snippet first and the real module later, so
+   the child became a syntax error. The wrapper swaps in `extract_code` for its
+   own process only: it collects every fenced block (including an unterminated
+   last one), drops placeholders, and keeps the last block that parses and
+   defines a function or class. `--extraction original` restores the team's
+   behaviour.
+2. **Child validation before training.** Each child must parse and define
+   top-level `get_policy_kwargs` and `get_ppo_kwargs`. An invalid child is
+   renamed to `*.rejected.py`, the operator exits with code 3 (logged as
+   `INVALID CHILD: <reason>`), and the parent is kept, exactly like any other
+   failed LLM call; no PPO time is spent on it. Duplicate definitions (the LLM
+   rewrote the whole module) are logged but allowed: Python keeps the last one.
+   `--no-validate` turns this off.
+3. **Retry on server gaps.** An empty reply (server down, HTTP error, between
+   two 8-hour server jobs) makes the wrapper wait for the server again (up to
+   `LLM_SERVER_READY_TIMEOUT` seconds, 4 h in the Slurm script) and retry, up to
+   `--llm-retries` times (default 3).
+
+The three flags above belong to the operator script; `run_mesb.py` always uses
+the defaults.
+
+**Parallel LLM calls.** `--llm-workers N` (default 8, `LLM_WORKERS` in Slurm)
+runs up to N operator calls at once. `server.py` batches up to 8 queued
+requests (`BATCH_SIZE = 8`), so 8 matches it. Each generation runs its
+crossovers in parallel, then its mutations. Parents, temperatures and gene ids
+are drawn in the same order as the sequential version, so the result does not
+depend on N. Each generation's log line ends with the LLM timing, e.g.
+`LLM 32 calls, 1 failed (1 invalid child), 41.2s avg / 88.0s max per call`.
+
 **Unit and integration tests** (NumPy + DEAP only):
 
 ```bash
@@ -348,11 +391,50 @@ scripts/mesb/submit_mesb.sh shadow_s0 0 mesb-shadow
 `submit_mesb.sh` creates `mujoco_rl_output/slurm_logs/` before calling
 `sbatch`, since Slurm needs the `--output` directory to exist. Other knobs:
 
+- `CHAIN=N`: submit N driver jobs back to back (`afterany`); each later job
+  resumes the run from its last checkpoint, and one that finds the run finished
+  only re-runs the analysis
+- `LLM_WORKERS` (default 8)
+- `LLM_SERVER_READY_TIMEOUT` (seconds an LLM call waits for a restarted
+  server; default 14400)
 - `BUFFER_CAPACITY`
 - `WORKERS`
 - `EXTRA_ARGS` (any `run_mesb.py` flag)
 - `MESB_ENV_SETUP` (site setup commands; default `module load uv`)
 - `DRIVER_PYTHON`, `LLM_PYTHON`, `EVAL_PYTHON`
+
+### Full run recipe
+
+```bash
+cd <your clone>
+git switch aayush/mesb-sliding-boundaries && git pull
+mkdir -p mujoco_rl_output/slurm_logs
+
+scripts/mesb/start_llm_server.sh 3        # LLM server for up to 24 h
+# wait until the first server answers:
+curl http://$(cat hostname.log):8169/     # {"message":"LLM API is running!"}
+
+CHAIN=2 LLM_WORKERS=8 scripts/mesb/submit_mesb.sh mesb_full_s0 0 mesb
+
+tail -f mujoco_rl_output/slurm_logs/mesb-mesb_full_s0-*.out
+```
+
+When the run finishes, `scancel` the server jobs that are still queued.
+
+**Time estimate** (defaults: 30 generations, population 32, 500k PPO steps,
+10 × 1000-step evaluation episodes, 16 CPUs):
+
+- PPO: about 1.1 ms per step on one CPU core (measured with the seed
+  network), so about 9 minutes per gene. 32 genes on 16 workers take 2
+  rounds, about 20 minutes per generation.
+- LLM: about 32 calls per generation. At about 50 s per call one after
+  another that is about 27 minutes per generation (about 14 h for the run,
+  beyond one 8-hour server job). With 8 calls batched together it should drop
+  to a few minutes per generation, but the batched speed of the real server
+  has not been measured yet; the per-generation log line reports it.
+- Total: roughly 12–16 h, so `CHAIN=2` for the driver (16 h per job) and 2–3
+  chained servers leave margin. Check the first two generation lines and
+  adjust.
 
 ## 17. Visualisation
 
@@ -443,12 +525,17 @@ needed at all is the point of MESB.
 
 - **Resolution is still a hyper-parameter** (`--mesb-dims`). MESB only
   removes the need to choose numeric edges.
-- The real Llama-3.3 server could not be run here (it needs 2 × H200). The
-  full LLM path (existing `llm_mutation` / `llm_crossover` / `llm_utils`,
-  server wait, HTTP `/generate`) was exercised against a stand-in server
-  speaking `server.py`'s protocol and returning edited code; the real model's
-  output quality is untested. Other smoke runs used `--llm-backend mock`,
-  which has no scientific meaning.
+- The real Llama-3.3 server was used on PACE for one short run (3
+  generations, 0 failed LLM calls). The extraction, validation, retry and
+  parallel-call changes were tested against a stand-in server that copies the
+  real server's reply format, not against the real server. `--llm-backend
+  mock` runs have no scientific meaning.
+- `server.py` samples a whole batch with the first request's temperature and
+  top-p. With parallel calls, requests of one generation can share a batch,
+  so a child may be sampled at a sibling's temperature (all are drawn from the
+  same small ranges). Use `--llm-workers 1` for strictly per-call temperatures.
+- The LLM often rewrites the whole module rather than one function, leaving
+  duplicate definitions (the last one wins). These are logged, not rejected.
 - Islands (`islands_wrapper.py`, migration) are not integrated; MESB runs a
   single population.
 - Evaluation runs inside a single Slurm allocation (parallel subprocesses).
@@ -481,11 +568,13 @@ are used as they already are at `6b73ae167`.
 | `sota/MujocoRL/analyze_mesb.py` | figures, `summary.md`, fixed-vs-sliding replay |
 | `run_mesb.py` | driver: modes, selection, checkpoints, logging |
 | `src/mesb_variation.py` | driver side of LLM variation (legacy probabilities/temperatures/gene ids) |
-| `src/mesb_llm_operator.py` | subprocess wrapper around the existing LLM operators (+ mock backend) |
+| `src/mesb_llm_operator.py` | subprocess wrapper around the existing LLM operators (+ mock backend, retry, child validation) |
+| `src/mesb_llm_guard.py` | robust code-block extraction and child validation (no torch needed) |
 | `src/cfg/constants_mesb.py` | single source of defaults |
 | `scripts/mesb/run_mesb.sbatch`, `scripts/mesb/submit_mesb.sh` | Slurm launch |
 | `scripts/mesb/llm_server.sbatch` | local LLM server on the constants' `PORT`, no island controller |
-| `tests/mesb/*` | 77 tests |
+| `scripts/mesb/start_llm_server.sh` | N chained 8-hour LLM server jobs |
+| `tests/mesb/*` | 106 tests |
 
 Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
 (`*`, created on first run) keeps them out of git without editing the root
@@ -544,3 +633,16 @@ Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
   existing LLM operators and a stand-in `server.py` made 18 LLM calls
   (6 create, 6 crossover, 6 mutation), all children loaded, 14/14 trained and
   evaluated.
+- LLM-side changes (extraction, validation, retry, parallel calls):
+  - `pytest tests/mesb`: 106 passed. New tests cover the exact reply shape
+    seen on PACE (placeholder block first, real module later), language tags,
+    unterminated blocks, unusable replies, child validation, parallel equals
+    sequential for the same seed, an invalid child keeping its parent, and
+    retry after an empty reply.
+  - On the PACE reply shape, the original extraction produced a child with a
+    syntax error (rejected, exit code 3, parent kept); the new extraction
+    produced the intended edit.
+  - A 3-generation real-PPO `mesb` run with `--llm-workers 4` against a
+    stand-in server that failed its first 3 requests: 4 requests reached the
+    server at once, the 3 failures were retried, 25 of 26 operator calls
+    produced a valid child and the invalid one kept its parent.
