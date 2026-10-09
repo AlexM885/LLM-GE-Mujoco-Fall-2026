@@ -39,7 +39,7 @@ def _metadata(**overrides):
         "frames": 16,
         "camera": "track",
         "image_max_side": 336,
-        "observer_model_id": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "observer_model_id": "google/gemma-3-27b-it",
         "observer_model_revision": "main",
         "prompt_revision": "v1",
         "mode": "visual",

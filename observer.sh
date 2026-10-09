@@ -31,6 +31,10 @@ export CUDA_VISIBLE_DEVICES=0
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export LLMGE_USE_SCRATCH_HF=1
 source scripts/pace_cache_env.sh
+if [ -z "${HF_TOKEN:-}" ] && [ -n "${LLMGE_HF_TOKEN_FILE:-}" ] && [ -f "$LLMGE_HF_TOKEN_FILE" ]; then
+    HF_TOKEN="$(tr -d '[:space:]' < "$LLMGE_HF_TOKEN_FILE")"
+    export HF_TOKEN
+fi
 export HF_TOKEN="${HF_TOKEN:-}"
 export HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-$HF_TOKEN}"
 
@@ -52,7 +56,7 @@ OBSERVER_PROJECT="${LLMGE_OBSERVER_PROJECT:-src/observer_env}"
 export LLMGE_FEEDBACK_MODE="$MODE"
 export LLMGE_FEEDBACK_CAPTURE_DIR="$CAPTURE_ROOT"
 export LLMGE_FEEDBACK_FRAMES="${LLMGE_FEEDBACK_FRAMES:-32}"
-export LLMGE_OBSERVER_MODEL_ID="${LLMGE_OBSERVER_MODEL_ID:-Qwen/Qwen2.5-VL-32B-Instruct}"
+export LLMGE_OBSERVER_MODEL_ID="${LLMGE_OBSERVER_MODEL_ID:-google/gemma-3-27b-it}"
 export LLMGE_OBSERVER_TORCH_DTYPE="${LLMGE_OBSERVER_TORCH_DTYPE:-bfloat16}"
 CAPTURE_TIMEOUT_SECONDS="${LLMGE_CAPTURE_TIMEOUT_SECONDS:-900}"
 
@@ -94,6 +98,8 @@ for GENE in $(echo "$GENES" | tr ',' ' '); do
         --camera "${LLMGE_FEEDBACK_CAMERA:-track}" \
         --image-max-side "${LLMGE_FEEDBACK_IMAGE_MAX_SIDE:-336}" \
         --seed-base "${LLMGE_FEEDBACK_SEED_BASE:-1000}" \
+        --render-stride "${LLMGE_FEEDBACK_RENDER_STRIDE:-5}" \
+        --frame-sampling "${LLMGE_FEEDBACK_FRAME_SAMPLING:-bookend}" \
         || echo "  [capture] FAILED or timed out for ${GENE}; continuing"
 done
 

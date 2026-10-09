@@ -36,6 +36,7 @@ LLM_SERVER_READY = False
 # "off" so the other domains that share this script are unaffected.
 FEEDBACK_MODE = globals().get("FEEDBACK_MODE", "off")
 FEEDBACK_REQUIRED = globals().get("FEEDBACK_REQUIRED", False)
+FEEDBACK_SELECT_OBSERVED_ONLY = globals().get("FEEDBACK_SELECT_OBSERVED_ONLY", False)
 try:
     from src import visual_feedback
 except Exception as _feedback_import_error:  # pragma: no cover - optional
@@ -68,6 +69,25 @@ def resolve_parent_feedback(parent_gene):
         print(f"\t☠ No cached {FEEDBACK_MODE} feedback for parent {parent_gene}")
     _FEEDBACK_RESOLVED[parent_gene] = text
     return text
+
+
+def has_parent_feedback(parent_gene):
+    """True when this parent has a usable cached feedback record."""
+    return bool(resolve_parent_feedback(parent_gene))
+
+
+def feedback_selection_pool(population):
+    """Filter selection pool to observed parents when requested.
+
+    The sparse VLM cache is useful only if mutation parents are among the
+    observed genes. When the filtered pool is empty, fall back to the full
+    population so a missing cache cannot deadlock a baseline run.
+    """
+    if FEEDBACK_MODE == "off" or not FEEDBACK_SELECT_OBSERVED_ONLY:
+        return population
+    observed = [ind for ind in population if ind and has_parent_feedback(ind[0])]
+    print(f"Feedback-observed selection pool: {len(observed)}/{len(population)}")
+    return observed or population
 
 
 # MAP-Elites settings. Only the Mujoco constants define these, so fall back to
@@ -1312,8 +1332,10 @@ if __name__ == "__main__":
             elites = []
             # Always produce a full batch of offspring, even while the archive
             # holds fewer individuals than population_size.
-            print(f"Selecting {population_size} offspring uniformly from the archive")
-            offspring = [random.choice(population) for _ in range(population_size)]
+            parent_pool = feedback_selection_pool(population)
+            print(f"Selecting {population_size} offspring uniformly from "
+                  f"{len(parent_pool)} archive parents")
+            offspring = [random.choice(parent_pool) for _ in range(population_size)]
         else:
             elites = tools.selSPEA2(population, num_elites)
 

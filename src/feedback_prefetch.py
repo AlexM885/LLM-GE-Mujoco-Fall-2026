@@ -37,16 +37,52 @@ def latest_checkpoint(folder):
     return os.path.join(folder, candidates[-1])
 
 
-def gene_ids_from_checkpoint(path):
+def _fitness_value(ind):
+    """Best-effort first-objective fitness for checkpoint individuals."""
+    try:
+        values = ind.fitness.values
+        if values:
+            return float(values[0])
+    except Exception:
+        pass
+    for attr in ("fitness", "mean_reward", "reward"):
+        value = getattr(ind, attr, None)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return float("-inf")
+
+
+def _archive_items(data):
+    archive = data.get("MAP_ELITES_ARCHIVE") or {}
+    if isinstance(archive, dict):
+        return list(archive.items())
+    return list(enumerate(archive))
+
+
+def gene_ids_from_checkpoint(path, strategy="archive"):
     _ensure_deap_classes()
     with open(path, "rb") as handle:
         data = pickle.load(handle)
-    archive = data.get("MAP_ELITES_ARCHIVE") or {}
-    genes = [ind[0] for ind in archive.values()]
-    if genes:
+    archive_items = _archive_items(data)
+    if archive_items:
+        if strategy == "top-fitness":
+            archive_items.sort(key=lambda item: _fitness_value(item[1]), reverse=True)
+        elif strategy == "low-fitness":
+            archive_items.sort(key=lambda item: _fitness_value(item[1]))
+        elif strategy == "diverse":
+            # Stable interleaving across the archive's cell order. This keeps
+            # behavior-space spread without requiring descriptor internals.
+            evens = archive_items[::2]
+            odds = archive_items[1::2]
+            archive_items = evens + odds
+        genes = [ind[0] for _, ind in archive_items]
         return genes
     # Fall back to the live population when the archive is empty (non-ME runs).
     population = data.get("population") or []
+    if strategy == "top-fitness":
+        population = sorted(population, key=_fitness_value, reverse=True)
+    elif strategy == "low-fitness":
+        population = sorted(population, key=_fitness_value)
     return [ind[0] for ind in population if hasattr(ind, "__getitem__")]
 
 
@@ -60,15 +96,19 @@ def main():
                         help="Optionally cap the number of genes (0 = all)")
     parser.add_argument("--checkpoint-file", default=None,
                         help="Explicit checkpoint file instead of the latest")
+    parser.add_argument("--strategy", default="archive",
+                        choices=("archive", "top-fitness", "low-fitness", "diverse"),
+                        help="Parent ordering before applying --limit")
     args = parser.parse_args()
 
     path = args.checkpoint_file or latest_checkpoint(args.checkpoints)
     if not path or not os.path.isfile(path):
         raise SystemExit(f"no checkpoint found in {args.checkpoints}")
-    genes = gene_ids_from_checkpoint(path)
+    genes = gene_ids_from_checkpoint(path, strategy=args.strategy)
     if args.limit > 0:
         genes = genes[:args.limit]
-    print(f"# parent genes from {path} ({len(genes)})", file=sys.stderr, flush=True)
+    print(f"# parent genes from {path} ({len(genes)}, strategy={args.strategy})",
+          file=sys.stderr, flush=True)
     for gene in genes:
         print(gene)
     if args.gene_file:

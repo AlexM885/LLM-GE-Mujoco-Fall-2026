@@ -115,8 +115,26 @@ def _episode_summary(ep_index, seed, total_reward, steps, terminated, start_x,
     return summary
 
 
+def _uniform_sample(rendered_frames, target_n):
+    if target_n <= 0 or not rendered_frames:
+        return []
+    if len(rendered_frames) <= target_n:
+        return list(rendered_frames)
+    indices = np.linspace(0, len(rendered_frames) - 1, num=target_n)
+    picked = sorted({int(round(i)) for i in indices})
+    # Rounding can collapse adjacent indices; fill deterministically from left.
+    if len(picked) < target_n:
+        for index in range(len(rendered_frames)):
+            if index not in picked:
+                picked.append(index)
+                if len(picked) == target_n:
+                    break
+    return [rendered_frames[i] for i in sorted(picked[:target_n])]
+
+
 def capture_episode(model, env, seed, ep_index=0, max_steps=1000, camera=None,
-                    start_n=4, end_n=4, render_stride=5, max_side=336,
+                    start_n=4, end_n=4, target_frames=None,
+                    frame_sampling="bookend", render_stride=5, max_side=336,
                     foot_geom_ids=None, feet_in_contact=None, get_x=None,
                     torso_state=None):
     """Run one deterministic rollout and return (frames, summary, series).
@@ -134,6 +152,7 @@ def capture_episode(model, env, seed, ep_index=0, max_steps=1000, camera=None,
     end_x = start_x
     start_frames = []
     end_ring = collections.deque(maxlen=max(0, end_n))
+    rendered_frames = []
     series = []
     z_values, pitch_values = [], []
     ep_terms = {"forward": 0.0, "healthy": 0.0, "ctrl": 0.0}
@@ -181,10 +200,13 @@ def capture_episode(model, env, seed, ep_index=0, max_steps=1000, camera=None,
             except Exception:
                 frame = None
             if frame is not None:
-                if len(start_frames) < max(0, start_n):
-                    start_frames.append((step, frame))
-                elif end_ring.maxlen:
-                    end_ring.append((step, frame))
+                if frame_sampling == "uniform":
+                    rendered_frames.append((step, frame))
+                else:
+                    if len(start_frames) < max(0, start_n):
+                        start_frames.append((step, frame))
+                    elif end_ring.maxlen:
+                        end_ring.append((step, frame))
             series.append({
                 "step": step,
                 "x": current_x,
@@ -197,7 +219,10 @@ def capture_episode(model, env, seed, ep_index=0, max_steps=1000, camera=None,
         if done:
             break
 
-    frames = start_frames + list(end_ring)
+    if frame_sampling == "uniform":
+        frames = _uniform_sample(rendered_frames, int(target_frames or 0))
+    else:
+        frames = start_frames + list(end_ring)
     frames.sort(key=lambda item: item[0])
     foot_names = []
     summary = _episode_summary(
@@ -259,6 +284,9 @@ def main():
     parser.add_argument("--image-max-side", type=int, default=336)
     parser.add_argument("--seed-base", type=int, default=1000)
     parser.add_argument("--render-stride", type=int, default=5)
+    parser.add_argument("--frame-sampling", default="bookend",
+                        choices=("bookend", "uniform"),
+                        help="bookend keeps start/end windows; uniform spans the full rollout")
     parser.add_argument("--no-video", action="store_true",
                         help="Skip writing the review mp4")
     args = parser.parse_args()
@@ -287,10 +315,13 @@ def main():
     except Exception as exc:
         print(f"  WARNING: initial render failed ({exc})")
 
-    start_n = max(0, args.frames // (2 * max(1, args.episodes)))
-    end_n = max(0, args.frames // max(1, args.episodes) - start_n)
+    frames_per_episode = max(1, args.frames // max(1, args.episodes))
+    start_n = max(0, frames_per_episode // 2)
+    end_n = max(0, frames_per_episode - start_n)
     seeds = [args.seed_base + i for i in range(args.episodes)]
     print(f"Capturing {args.episodes} episodes, seeds={seeds}, "
+          f"frame_sampling={args.frame_sampling}, "
+          f"frames_per_episode={frames_per_episode}, "
           f"start_window={start_n}, end_window={end_n}")
 
     all_frames = []
@@ -299,7 +330,8 @@ def main():
         frames, summary, series = capture_episode(
             model, env, seed=seed, ep_index=index, max_steps=args.max_steps,
             camera=args.camera,
-            start_n=start_n, end_n=end_n, render_stride=args.render_stride,
+            start_n=start_n, end_n=end_n, target_frames=frames_per_episode,
+            frame_sampling=args.frame_sampling, render_stride=args.render_stride,
             max_side=args.image_max_side, foot_geom_ids=foot_ids,
             feet_in_contact=_feet_in_contact, get_x=_get_x_position)
         summary["foot_geom_names"] = foot_names
@@ -328,6 +360,7 @@ def main():
         "camera": args.camera,
         "image_max_side": args.image_max_side,
         "render_stride": args.render_stride,
+        "frame_sampling": args.frame_sampling,
         "start_window": start_n,
         "end_window": end_n,
         "created_at": datetime.datetime.utcnow().isoformat() + "Z",

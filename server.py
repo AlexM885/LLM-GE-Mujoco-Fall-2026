@@ -16,8 +16,8 @@ from src.cfg.constants import *
 
 app = FastAPI(title="LLM API", version="1.0")
 
-BATCH_SIZE = 8  # num of LLM requests to process at once
-BATCH_WAIT_TIME = 2  # max wait time for batch to fill in s
+BATCH_SIZE = int(os.getenv("LLMGE_SERVER_BATCH_SIZE", "8"))
+BATCH_WAIT_TIME = float(os.getenv("LLMGE_SERVER_BATCH_WAIT_TIME", "2"))
 
 class LLMRequest(BaseModel):
     prompt: str
@@ -107,7 +107,7 @@ class LLMModel:
                     "Transformers placed the model on CPU despite CUDA being available."
                 )
 
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL_PATH)
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
         print("tokenizer created", flush=True)
         
         # decoder-only models need left padding for correct generation order

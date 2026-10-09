@@ -7,7 +7,7 @@ cannot break evolution. Load the model once and process a batch of parents, as
 ``observer.sh`` does; persistent idle GPU allocation costs more than inference.
 
 Backends:
-    hf    Qwen2.5-VL (or any Qwen-VL) through transformers. Needs GPU.
+    hf    Hugging Face vision-language model through transformers. Needs GPU.
     mock  deterministic heuristic observer, no GPU. Used to validate the
           end-to-end plumbing and by the unit tests.
 
@@ -39,10 +39,14 @@ try:
         capture_dir as vf_capture_dir,
         compute_cache_key,
         load_cached_observation,
+        genome_path,
         parent_metadata,
         telemetry_brief,
         validate_observation,
         format_and_store,
+        deterministic_mutation_plan,
+        normalize_mutation_plan,
+        structured_planner_enabled,
         _cfg,
     )
 except ImportError:  # pragma: no cover - path fallback for nested launches
@@ -50,10 +54,14 @@ except ImportError:  # pragma: no cover - path fallback for nested launches
         capture_dir as vf_capture_dir,
         compute_cache_key,
         load_cached_observation,
+        genome_path,
         parent_metadata,
         telemetry_brief,
         validate_observation,
         format_and_store,
+        deterministic_mutation_plan,
+        normalize_mutation_plan,
+        structured_planner_enabled,
         _cfg,
     )
 
@@ -63,6 +71,13 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are a careful locomotion observer. You describe only what the supplied "
     "evidence supports and say when a behaviour cannot be determined. You never "
     "diagnose hyperparameters or prescribe fixes."
+)
+
+PLANNER_SYSTEM_PROMPT = (
+    "You are a conservative multimodal mutation planner for MuJoCo RL code. "
+    "Use only the supplied rollout telemetry, ordered frames, and source excerpt. "
+    "Return strict JSON. Propose one bounded code-edit direction, not a rewrite. "
+    "Never change the environment, evaluation reward, seeds, or output files."
 )
 
 
@@ -82,7 +97,26 @@ def load_prompt_template():
         )
 
 
-def build_user_text(template, telemetry, frame_files, mode):
+def source_excerpt(gene_id, max_chars=9000):
+    path = genome_path(gene_id)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return "  (source unavailable)"
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 2
+    tail = max_chars - head
+    return (
+        text[:head]
+        + "\n\n# ... source excerpt truncated; middle omitted ...\n\n"
+        + text[-tail:]
+    )
+
+
+def build_user_text(template, telemetry, frame_files, mode, gene_id=None,
+                    planner=False):
     if mode == "visual":
         frame_block = "\n".join(
             f"  frame {i}: {os.path.basename(path)}"
@@ -94,6 +128,28 @@ def build_user_text(template, telemetry, frame_files, mode):
     text = text.replace("<<MODE>>", mode)
     text = text.replace("<<FRAMES>>", frame_block)
     text = text.replace("<<TELEMETRY>>", telemetry_brief(telemetry))
+    if planner:
+        text += (
+            "\n\nYou are producing a structured mutation plan for the next "
+            "LLM-GE code edit. Return one JSON object with exactly these "
+            "top-level keys:\n"
+            "determinable (bool), visible_posture (str), motion_pattern (str), "
+            "instability (str), supporting_frames (list[int]), uncertainty "
+            "('low'|'medium'|'high'), notes (str), mutation_plan (object).\n\n"
+            "mutation_plan must contain exactly:\n"
+            "failure_mode (str), evidence (list[str]), mutation_goal (str), "
+            "allowed_code_changes (list[str]), forbidden_changes (list[str]), "
+            "priority_metric (str).\n\n"
+            "The plan must be code-actionable and bounded. Allowed changes may "
+            "mention training hyperparameters, exploration/noise schedule, "
+            "network sizes, or training-only reward shaping. Forbidden changes "
+            "must include not changing environment, final evaluation reward, "
+            "hard-coded actions, seeds, or evaluation outputs.\n\n"
+            "Parent source excerpt:\n"
+            "```python\n"
+            f"{source_excerpt(gene_id)}\n"
+            "```\n"
+        )
     return text
 
 
@@ -181,10 +237,29 @@ def mock_observe(telemetry, frame_files, mode):
     }
 
 
+def observation_fallback(note):
+    return {
+        "determinable": False,
+        "visible_posture": "unknown",
+        "motion_pattern": "unknown",
+        "instability": "unknown",
+        "supporting_frames": [],
+        "uncertainty": "high",
+        "notes": note,
+    }
+
+
 class HFObserver:
     def __init__(self, model_id, revision, dtype="bfloat16", max_new_tokens=512):
         import torch
-        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+        from transformers import AutoProcessor
+
+        try:
+            from transformers import AutoModelForImageTextToText
+            model_cls = AutoModelForImageTextToText
+        except ImportError:  # pragma: no cover - older transformers fallback
+            from transformers import AutoModelForVision2Seq
+            model_cls = AutoModelForVision2Seq
 
         torch_dtype = {
             "bfloat16": torch.bfloat16,
@@ -193,10 +268,10 @@ class HFObserver:
         }.get(dtype, torch.bfloat16)
         self.torch = torch
         self.max_new_tokens = max_new_tokens
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        self.processor = AutoProcessor.from_pretrained(model_id, revision=revision)
+        self.model = model_cls.from_pretrained(
             model_id, revision=revision, torch_dtype=torch_dtype, device_map="auto")
         self.model.eval()
-        self.processor = AutoProcessor.from_pretrained(model_id, revision=revision)
 
     def observe(self, system_prompt, user_text, frame_files, mode):
         messages = [
@@ -209,19 +284,23 @@ class HFObserver:
         return self._generate(messages)
 
     def _generate(self, messages):
-        try:
-            from qwen_vl_utils import process_vision_info
-        except ImportError as exc:  # pragma: no cover - depends on observer env
-            raise RuntimeError(
-                "qwen_vl_utils is required for the hf backend; install "
-                "src/observer_env") from exc
+        from PIL import Image
 
+        images = []
+        for message in messages:
+            for item in message.get("content", []):
+                if item.get("type") == "image":
+                    images.append(Image.open(item["image"]).convert("RGB"))
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True)
-        image_inputs, video_inputs = process_vision_info(messages)
-        inputs = self.processor(
-            text=[text], images=image_inputs, videos=video_inputs,
-            padding=True, return_tensors="pt").to(self.model.device)
+        processor_kwargs = {
+            "text": [text],
+            "padding": True,
+            "return_tensors": "pt",
+        }
+        if images:
+            processor_kwargs["images"] = images
+        inputs = self.processor(**processor_kwargs).to(self.model.device)
         with self.torch.inference_mode():
             generated = self.model.generate(
                 **inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
@@ -268,14 +347,20 @@ def observe_parent(gene_id, observer=None, backend="hf", mode="visual",
 
     telemetry = bundle["telemetry"]
     frame_files = bundle["frame_files"]
-    system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
-    user_text = build_user_text(load_prompt_template(), telemetry, frame_files, mode)
+    planner = structured_planner_enabled()
+    system_prompt = system_prompt or (
+        PLANNER_SYSTEM_PROMPT if planner else DEFAULT_SYSTEM_PROMPT)
+    user_text = build_user_text(
+        load_prompt_template(), telemetry, frame_files, mode,
+        gene_id=gene_id, planner=planner)
 
     start = time.time()
     raw = ""
     usage = {}
     if backend == "mock":
         record = mock_observe(telemetry, frame_files, mode)
+        if planner:
+            record["mutation_plan"] = deterministic_mutation_plan(record, telemetry)
     elif backend == "hf":
         if observer is None:
             raise RuntimeError("hf backend requires a loaded HFObserver")
@@ -284,31 +369,22 @@ def observe_parent(gene_id, observer=None, backend="hf", mode="visual",
             record = parse_observation_json(raw)
         except (ValueError, json.JSONDecodeError) as exc:
             print(f"  parse failed for {gene_id}: {exc}; writing undeterminable record")
-            record = {
-                "determinable": False,
-                "visible_posture": "unknown",
-                "motion_pattern": "unknown",
-                "instability": "unknown",
-                "supporting_frames": [],
-                "uncertainty": "high",
-                "notes": f"unparseable observer output: {str(exc)[:200]}",
-            }
+            record = observation_fallback(
+                f"unparseable observer output: {str(exc)[:200]}")
         usage = {"raw_output": raw}
     else:
         raise ValueError(f"unknown backend: {backend}")
 
+    if planner:
+        record["mutation_plan"] = normalize_mutation_plan(
+            record.get("mutation_plan"), record, telemetry)
+
     ok, reason = validate_observation(record)
     if not ok:
         print(f"  invalid record for {gene_id}: {reason}; coercing")
-        record = {
-            "determinable": False,
-            "visible_posture": "unknown",
-            "motion_pattern": "unknown",
-            "instability": "unknown",
-            "supporting_frames": [],
-            "uncertainty": "high",
-            "notes": f"invalid observer output: {reason}",
-        }
+        record = observation_fallback(f"invalid observer output: {reason}")
+        if planner:
+            record["mutation_plan"] = deterministic_mutation_plan(record, telemetry)
         ok, reason = validate_observation(record)
 
     elapsed = round(time.time() - start, 3)
@@ -319,6 +395,7 @@ def observe_parent(gene_id, observer=None, backend="hf", mode="visual",
         "observed_at": time.time(),
         "observe_seconds": elapsed,
         "frame_count": len(frame_files) if mode == "visual" else 0,
+        "structured_planner": planner,
         "cost_within_budget": elapsed <= float(_cfg("FEEDBACK_MAX_COST_SECONDS", 120)),
         "usage": usage,
     }
@@ -363,7 +440,7 @@ def main():
     if mode == "off":
         mode = "visual"
     backend = (args.backend or _cfg("OBSERVER_BACKEND", "hf")).strip().lower()
-    model_id = args.model_id or _cfg("OBSERVER_MODEL_ID", "Qwen/Qwen2.5-VL-7B-Instruct")
+    model_id = args.model_id or _cfg("OBSERVER_MODEL_ID", "google/gemma-3-27b-it")
     revision = args.revision or _cfg("OBSERVER_MODEL_REVISION", "main")
     max_new_tokens = args.max_new_tokens or int(_cfg("OBSERVER_MAX_NEW_TOKENS", 512))
     dtype = args.dtype or _cfg("OBSERVER_TORCH_DTYPE", "bfloat16")

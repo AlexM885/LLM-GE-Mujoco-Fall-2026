@@ -19,7 +19,10 @@ SEED_NETWORK = os.path.join(SOTA_ROOT, "network.py")
 #: Model basename prefix (used in file naming: network_{gene_id}.py)
 MODEL = "network"
 #: Path to local LLM model path used by server.py for LLM operations
-MODEL_PATH = "/storage/ice-shared/vip-vvk/llm_storage/meta-llama/Llama-3.3-70B-Instruct/"
+MODEL_PATH = os.getenv(
+    "LLMGE_MODEL_PATH",
+    "/storage/ice-shared/vip-vvk/llm_storage/meta-llama/Llama-3.3-70B-Instruct/",
+)
 LLM_MAX_NEW_TOKENS = int(os.getenv("LLM_MAX_NEW_TOKENS", "1648"))
 #: Directory where LLM-generated model variants are stored
 VARIANT_DIR = os.path.join(SOTA_ROOT, "models")
@@ -305,19 +308,33 @@ FEEDBACK_CAMERA = os.getenv("LLMGE_FEEDBACK_CAMERA", "track")
 #: Longest image side in pixels before the observer sees a frame. Bounds the
 #: visual-token budget and therefore inference cost.
 FEEDBACK_IMAGE_MAX_SIDE = int(os.getenv("LLMGE_FEEDBACK_IMAGE_MAX_SIDE", "336"))
+#: How rollout frames are selected before VLM observation. "bookend" keeps
+#: short start/end clips; "uniform" spans the whole rollout for gait evidence.
+FEEDBACK_FRAME_SAMPLING = os.getenv("LLMGE_FEEDBACK_FRAME_SAMPLING", "bookend")
+FEEDBACK_RENDER_STRIDE = int(os.getenv("LLMGE_FEEDBACK_RENDER_STRIDE", "5"))
+#: When enabled, the VLM returns a bounded JSON mutation plan in addition to
+#: descriptive behaviour fields. The controller then passes that structured
+#: plan to the code mutator instead of relying on free-form visual narration.
+FEEDBACK_STRUCTURED_PLANNER = os.getenv(
+    "LLMGE_FEEDBACK_STRUCTURED_PLANNER", "0").lower() in ("1", "true", "yes")
 #: Bump when the observer prompt changes; part of the cache key.
-FEEDBACK_PROMPT_REVISION = os.getenv("LLMGE_FEEDBACK_PROMPT_REVISION", "v1")
+FEEDBACK_PROMPT_REVISION = os.getenv("LLMGE_FEEDBACK_PROMPT_REVISION", "v2-actionable")
 #: Per-observation wall-clock budget in seconds, recorded against actuals.
 FEEDBACK_MAX_COST_SECONDS = float(os.getenv("LLMGE_FEEDBACK_MAX_COST_SECONDS", "120"))
 #: If true, a parent without a cached observation is not mutated (the run still
 #: continues with the rest of the batch). If false, mutation proceeds without
 #: feedback and logs a warning, so a missing cache cannot break a run.
 FEEDBACK_REQUIRED = os.getenv("LLMGE_FEEDBACK_REQUIRED", "0").lower() in ("1", "true", "yes")
+#: When true and feedback is enabled, selection prefers parents whose feedback
+#: cache is present. This makes VLM ablations honest: generated children are
+#: actually conditioned on the VLM records we paid to create.
+FEEDBACK_SELECT_OBSERVED_ONLY = os.getenv(
+    "LLMGE_FEEDBACK_SELECT_OBSERVED_ONLY", "0").lower() in ("1", "true", "yes")
 
-#: Frozen observer model. Qwen2.5-VL supports multi-image input and a
-#: configurable visual-token budget. The revision is pinned into the cache key.
+#: Frozen observer model. Use an allowed VLM; the revision is pinned into the
+#: cache key so observations from different model families never collide.
 OBSERVER_MODEL_ID = os.getenv(
-    "LLMGE_OBSERVER_MODEL_ID", "Qwen/Qwen2.5-VL-7B-Instruct")
+    "LLMGE_OBSERVER_MODEL_ID", "google/gemma-3-27b-it")
 OBSERVER_MODEL_REVISION = os.getenv("LLMGE_OBSERVER_MODEL_REVISION", "main")
 #: Backend used by src/behavior_observer.py: "hf" (transformers) or "mock".
 OBSERVER_BACKEND = os.getenv("LLMGE_OBSERVER_BACKEND", "hf").strip().lower()

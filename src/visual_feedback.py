@@ -60,6 +60,13 @@ def _cfg(name, default=None):
     return getattr(C, name, default)
 
 
+def structured_planner_enabled():
+    value = _cfg("FEEDBACK_STRUCTURED_PLANNER", False)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def _seeds():
     base = int(_cfg("FEEDBACK_SEED_BASE", 1000))
     episodes = int(_cfg("FEEDBACK_EPISODES", 2))
@@ -122,9 +129,12 @@ def parent_metadata(parent_gene, mode=None):
         "frames": int(_cfg("FEEDBACK_FRAMES", 16)),
         "camera": _cfg("FEEDBACK_CAMERA", "track"),
         "image_max_side": int(_cfg("FEEDBACK_IMAGE_MAX_SIDE", 336)),
-        "observer_model_id": _cfg("OBSERVER_MODEL_ID", "Qwen/Qwen2.5-VL-7B-Instruct"),
+        "render_stride": int(_cfg("FEEDBACK_RENDER_STRIDE", 5)),
+        "frame_sampling": _cfg("FEEDBACK_FRAME_SAMPLING", "bookend"),
+        "observer_model_id": _cfg("OBSERVER_MODEL_ID", "google/gemma-3-27b-it"),
         "observer_model_revision": _cfg("OBSERVER_MODEL_REVISION", "main"),
         "prompt_revision": _cfg("FEEDBACK_PROMPT_REVISION", "v1"),
+        "structured_planner": structured_planner_enabled(),
         "mode": (mode or _cfg("FEEDBACK_MODE", "off")).strip().lower(),
     }
 
@@ -181,6 +191,19 @@ def validate_observation(record):
         return False, "supporting_frames must be a list of non-negative ints"
     if record["uncertainty"] not in ALLOWED_UNCERTAINTY:
         return False, f"uncertainty must be one of {ALLOWED_UNCERTAINTY}"
+    plan = record.get("mutation_plan")
+    if plan is not None:
+        if not isinstance(plan, dict):
+            return False, "mutation_plan must be a dict"
+        for key in ("failure_mode", "mutation_goal", "priority_metric"):
+            if not isinstance(plan.get(key), str) or not plan[key].strip():
+                return False, f"mutation_plan.{key} must be a non-empty string"
+        for key in ("evidence", "allowed_code_changes", "forbidden_changes"):
+            values = plan.get(key)
+            if not isinstance(values, list) or not values:
+                return False, f"mutation_plan.{key} must be a non-empty list"
+            if any(not isinstance(item, str) or not item.strip() for item in values):
+                return False, f"mutation_plan.{key} must contain non-empty strings"
     return True, ""
 
 
@@ -199,8 +222,34 @@ def normalize_observation(record, **metadata):
         int(f) for f in normalized["supporting_frames"]
         if isinstance(f, (int, float)) and int(f) >= 0
     ]
+    if isinstance(normalized.get("mutation_plan"), dict):
+        normalized["mutation_plan"] = normalize_mutation_plan(
+            normalized["mutation_plan"], normalized, metadata.get("telemetry"))
     for key, value in metadata.items():
         normalized[key] = value
+    return normalized
+
+
+def normalize_mutation_plan(plan, record=None, telemetry=None):
+    """Clamp a VLM-generated planner response into a small, safe schema."""
+    fallback = deterministic_mutation_plan(record or {}, telemetry or {})
+    if not isinstance(plan, dict):
+        return fallback
+
+    normalized = {}
+    for key in ("failure_mode", "mutation_goal", "priority_metric"):
+        value = str(plan.get(key, fallback[key])).strip()
+        normalized[key] = value[:240] if value else fallback[key]
+    for key in ("evidence", "allowed_code_changes", "forbidden_changes"):
+        values = plan.get(key, fallback[key])
+        if not isinstance(values, list):
+            values = fallback[key]
+        cleaned = []
+        for item in values[:6]:
+            text = str(item).strip()
+            if text:
+                cleaned.append(text[:220])
+        normalized[key] = cleaned or fallback[key]
     return normalized
 
 
@@ -244,6 +293,103 @@ def telemetry_brief(telemetry):
     return "\n".join(lines) if lines else "  (no telemetry recorded)"
 
 
+def mutation_focus(record, telemetry):
+    """Actionable but bounded target for the code editor.
+
+    The VLM remains an observer; this derived block converts observation and
+    deterministic telemetry into one engineering objective. It deliberately
+    avoids naming a specific hyperparameter so the edit is still discovered by
+    training/evaluation rather than prescribed by the observer.
+    """
+    episodes = telemetry.get("episodes", []) if telemetry else []
+    if not episodes:
+        return [
+            "  objective: make the smallest plausible robustness improvement",
+            "  reason: no rollout telemetry was available to localize failure",
+            "  avoid: broad rewrites or changing the environment/reward",
+        ]
+
+    mean_return = sum(float(ep.get("return", 0.0) or 0.0) for ep in episodes) / len(episodes)
+    mean_steps = sum(float(ep.get("steps", 0.0) or 0.0) for ep in episodes) / len(episodes)
+    mean_distance = sum(float(ep.get("distance", 0.0) or 0.0) for ep in episodes) / len(episodes)
+    contacts = []
+    for ep in episodes:
+        c0 = ep.get("foot_contact_0")
+        c1 = ep.get("foot_contact_1")
+        if c0 is not None and c1 is not None:
+            contacts.append(abs(float(c0) - float(c1)))
+    contact_gap = sum(contacts) / len(contacts) if contacts else 0.0
+
+    visual_text = " ".join(
+        str(record.get(key, "")).lower()
+        for key in ("visible_posture", "motion_pattern", "instability", "notes")
+    )
+    collapse_seen = any(term in visual_text for term in (
+        "collapse", "fall", "tips", "tipping", "drops", "loss of balance",
+        "unstable", "wobble",
+    ))
+
+    if mean_steps < 250 or collapse_seen:
+        objective = "increase early-episode balance and healthy-duration stability"
+        reason = (
+            f"mean rollout length is {_fmt_float(mean_steps, 1)} steps and the "
+            "visual/telemetry evidence indicates early instability"
+        )
+        avoid = "do not chase speed until the walker survives longer"
+    elif mean_distance < 3.0 or mean_return < 700:
+        objective = "convert a mostly stationary gait into forward locomotion"
+        reason = (
+            f"mean distance is {_fmt_float(mean_distance, 2)} with mean return "
+            f"{_fmt_float(mean_return, 1)}, so survival is not becoming travel"
+        )
+        avoid = "do not add large networks; prefer one targeted policy/training change"
+    elif contact_gap > 0.25:
+        objective = "reduce left-right foot-contact imbalance while preserving forward speed"
+        reason = f"mean foot-contact asymmetry is {_fmt_float(contact_gap, 3)}"
+        avoid = "do not collapse both contacts to a standing/stalling policy"
+    else:
+        objective = "improve forward speed while preserving the observed stable gait"
+        reason = (
+            f"rollouts last {_fmt_float(mean_steps, 1)} steps on average and "
+            f"travel {_fmt_float(mean_distance, 2)} distance"
+        )
+        avoid = "do not destabilize posture for a speculative speed gain"
+
+    return [
+        f"  objective: {objective}",
+        f"  reason: {reason}",
+        f"  avoid: {avoid}",
+        "  edit scope: one bounded code change; keep reward/env/evaluation unchanged",
+    ]
+
+
+def deterministic_mutation_plan(record, telemetry):
+    """Structured fallback used when the VLM does not provide a valid plan."""
+    focus_lines = mutation_focus(record or {}, telemetry or {})
+    objective = focus_lines[0].split("objective:", 1)[-1].strip()
+    reason = focus_lines[1].split("reason:", 1)[-1].strip()
+    avoid = focus_lines[2].split("avoid:", 1)[-1].strip()
+    return {
+        "failure_mode": objective,
+        "evidence": [
+            reason,
+            str((record or {}).get("instability", "observer instability unknown"))[:220],
+        ],
+        "mutation_goal": objective,
+        "allowed_code_changes": [
+            "make one bounded change to TD3/PPO training hyperparameters",
+            "adjust training-only reward shaping or exploration schedule if already present",
+            "preserve the model interface and existing evaluation script",
+        ],
+        "forbidden_changes": [
+            "do not change the MuJoCo environment or final evaluation reward",
+            "do not hard-code actions, trajectories, seeds, or evaluation outputs",
+            avoid,
+        ],
+        "priority_metric": "mean evaluation reward after training, with episode length as a stability check",
+    }
+
+
 def build_feedback_text(record, telemetry):
     """The text block appended to a mutation prompt.
 
@@ -252,15 +398,29 @@ def build_feedback_text(record, telemetry):
     feedback and the hard rules are unchanged.
     """
     mode = record.get("mode", "visual")
+    plan = record.get("mutation_plan")
+    if not isinstance(plan, dict):
+        plan = deterministic_mutation_plan(record, telemetry)
+
     lines = [
         "",
         "Additional evidence about the parent policy's measured behaviour.",
-        "Use it only to choose one bounded code change. Do not treat it as an",
-        "explanation of which hyperparameter is wrong; only a trained child can",
-        "confirm a change.",
+        "Use it to choose one bounded code change. Treat the mutation plan as",
+        "a hypothesis, not proof; only a trained child can confirm a change.",
         "",
         "Numerical telemetry from deterministic rollouts:",
         telemetry_brief(telemetry),
+        "",
+        "Structured mutation plan:",
+        f"  failure_mode: {plan.get('failure_mode', '')}",
+        "  evidence:",
+        *[f"    - {item}" for item in plan.get("evidence", [])],
+        f"  mutation_goal: {plan.get('mutation_goal', '')}",
+        "  allowed_code_changes:",
+        *[f"    - {item}" for item in plan.get("allowed_code_changes", [])],
+        "  forbidden_changes:",
+        *[f"    - {item}" for item in plan.get("forbidden_changes", [])],
+        f"  priority_metric: {plan.get('priority_metric', '')}",
     ]
     if mode == "visual":
         if record.get("determinable"):

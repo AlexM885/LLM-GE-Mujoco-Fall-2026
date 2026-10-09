@@ -13,4 +13,4 @@ export CUDA_VISIBLE_DEVICES=0
 
 export HF_HOME=
 
-uv run python run_improved.py test --global_path test/global_data --llm_model qwen25
+uv run python run_improved.py test --global_path test/global_data --llm_model llama3

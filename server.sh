@@ -17,8 +17,8 @@ hostname
 module load cuda
 module load uv
 
-# Make sure CUDA can see all GPUs
-export CUDA_VISIBLE_DEVICES=0,1
+# Respect Slurm's GPU cgroup. Overriding this can make PyTorch think a
+# non-allocated GPU exists and crash during model sharding.
 source scripts/pace_cache_env.sh
 
 export SERVER_HOSTNAME=$(hostname)
