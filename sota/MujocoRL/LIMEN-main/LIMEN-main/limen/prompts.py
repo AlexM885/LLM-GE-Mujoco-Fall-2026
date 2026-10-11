@@ -1,0 +1,1103 @@
+"""Prompt templates and builder for LIMEN.
+
+Assembles system/user message pairs for two scenarios:
+- From scratch: first generation with no parent (iteration 1 or fresh island)
+- Evolutionary: improve on a parent program using feedback (errors, metrics, top programs)
+"""
+
+from __future__ import annotations
+
+import random
+import re
+from typing import Any, Dict, List, Optional
+
+from limen.config import PromptConfig
+from limen.crash_filter import CrashFilterResult
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+STAGE_NAMES: Dict[int, str] = {
+    0: "Syntax Check (stage 0) — code could not be parsed",
+    1: "Import Check (stage 1) — module failed to load",
+    2: "Dry-Run (stage 2) — runtime error when calling functions with a real environment state",
+}
+
+# Extraction patterns, ordered by specificity (most → least specific).
+_FENCE_PYTHON_RE = re.compile(r"```[Pp]ython\s*\n(.*?)```", re.DOTALL)
+_FENCE_ANY_RE = re.compile(r"```\w*\s*\n(.*?)```", re.DOTALL)
+_BARE_CODE_RE = re.compile(
+    r"(import jax\b.*?(?:def get_observation|def compute_reward).*)",
+    re.DOTALL,
+)
+
+# ---------------------------------------------------------------------------
+# Mode-dependent content helpers
+# ---------------------------------------------------------------------------
+
+_FUNCTION_DESC = {
+    "full": (
+        "Your task is to write two JAX-compatible Python functions:\n"
+        "1. `get_observation(state)` — extracts a 1D float32 observation vector from the environment state\n"
+        "2. `compute_reward(state, action, next_state)` — computes a scalar float32 reward signal"
+    ),
+    "reward_only": (
+        "Your task is to write one JAX-compatible Python function:\n"
+        "- `compute_reward(state, action, next_state)` — computes a scalar float32 reward signal\n\n"
+        "The observation function is fixed (provided by the system). You only design the reward."
+    ),
+    "obs_only": (
+        "Your task is to write one JAX-compatible Python function:\n"
+        "- `get_observation(state)` — extracts a 1D float32 observation vector from the environment state\n\n"
+        "The reward function uses the environment's built-in reward. You only design the observation."
+    ),
+    "random": (
+        "Your task is to write two JAX-compatible Python functions:\n"
+        "1. `get_observation(state)` — extracts a 1D float32 observation vector from the environment state\n"
+        "2. `compute_reward(state, action, next_state)` — computes a scalar float32 reward signal"
+    ),
+}
+
+_OUTPUT_CONSTRAINTS = {
+    "full": (
+        "The code must define both `get_observation` and `compute_reward` with the exact "
+        "signatures shown above. You may define helper constants or functions above them.\n"
+        "Only `import jax` and `import jax.numpy as jnp` are allowed."
+    ),
+    "reward_only": (
+        "The code must define `compute_reward(state, action, next_state)` returning a scalar jnp.float32.\n"
+        "You may define helper constants or functions above it.\n"
+        "Only `import jax` and `import jax.numpy as jnp` are allowed."
+    ),
+    "obs_only": (
+        "The code must define `get_observation(state)` returning a 1D jnp.float32 array (max 512 elements).\n"
+        "You may define helper constants or functions above it.\n"
+        "Only `import jax` and `import jax.numpy as jnp` are allowed."
+    ),
+    "random": (
+        "The code must define both `get_observation` and `compute_reward` with the exact "
+        "signatures shown above. You may define helper constants or functions above them.\n"
+        "Only `import jax` and `import jax.numpy as jnp` are allowed."
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# Prompt templates
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """\
+You are an expert reinforcement learning engineer. You design MDP interfaces \
+for RL agents in reinforcement learning environments.
+
+{function_description}
+
+The RL agent sees ONLY what get_observation returns and is trained ONLY on what \
+compute_reward provides. Your design of these functions determines whether the \
+agent can learn the task.
+
+## Design Philosophy
+
+**The goal is to help a neural network LEARN, not to solve the task yourself.**
+
+Observation design:
+- The observation must give the agent ALL the information it needs to learn \
+the task. Think carefully about what the agent needs to perceive from the \
+environment state.
+- Include any relational or structural information that is relevant to the task.
+- Normalize features to similar ranges (e.g., [0, 1] or [-1, 1]).
+- The observation can be anywhere from a handful of features to hundreds — \
+use whatever the task requires. The max is 512 elements.
+- Compute everything from the current state. Do NOT hardcode any environment-\
+specific constants — the environment is randomized across episodes.
+
+Reward design:
+{reward_philosophy}
+
+Generalization:
+- The environment is evaluated across RANDOMIZED initial conditions. Your \
+interface must generalize across all of them, not just one specific setup.
+- Do NOT hardcode environment-specific constants. Compute everything from \
+the current state.
+- The reward must reflect ACTUAL task progress, not a proxy that happens to \
+correlate in some configurations. If the reward can be maximized without \
+completing the task, the agent will learn to exploit that shortcut.
+- Test your reasoning: would this observation and reward still make sense if \
+the initial conditions were completely different?
+
+## Library Reference
+
+{library_context}
+
+## Output Format
+
+Return your code inside a single Python markdown fence (```python ... ```).
+{output_constraints}"""
+
+USER_PROMPT_FROM_SCRATCH = """\
+## Task
+
+{task_description}
+
+{failure_section}
+
+## Instructions
+
+{function_instructions}
+
+{obs_instructions}\
+{reward_instructions}\
+JAX pitfalls to avoid:
+- jax.lax.select requires both branches to have the SAME dtype (cast explicitly)
+- Array indices must be integers, not floats (use .astype(jnp.int32))
+- No Python if/else on JAX arrays (use jax.lax.select or jnp.where)
+- Cast integer state values to float32 before arithmetic
+
+Constraints:
+{constraints}
+- All code must be JAX-traceable (no Python if/else on JAX arrays)
+- Only jax and jax.numpy imports are allowed"""
+
+USER_PROMPT_EVOLUTIONARY = """\
+## Task
+
+{task_description}
+
+## Parent Program
+
+The following program is the starting point for your improvement:
+
+{parent_section}
+
+{feedback_sections}
+
+## Instructions
+
+Based on the feedback above, write an improved version of the MDP interface.
+
+{improvement_guidance}
+
+Constraints:
+{constraints}
+- All code must be JAX-traceable (no Python if/else on JAX arrays)
+- Only jax and jax.numpy imports are allowed
+
+**Output your improved code inside a single ```python ... ``` fence. No text outside the fence.**"""
+
+# ---------------------------------------------------------------------------
+# Section templates
+# ---------------------------------------------------------------------------
+
+SECTION_PARENT_CODE = """\
+--- BEGIN CODE ---
+{code}
+--- END CODE ---
+Success rate: {success_rate}  |  Reward: {final_return}  |  Obs dim: {obs_dim}"""
+
+SECTION_PARENT_CODE_CRASHED = """\
+--- BEGIN CODE ---
+{code}
+--- END CODE ---
+(This program crashed before training — see failures below.)"""
+
+SECTION_TOP_PROGRAMS = """\
+## Best Known Programs
+
+{entries}"""
+
+SECTION_TOP_PROGRAM_ENTRY = """\
+### Program #{rank} ({fitness_label}: {success_rate})
+--- BEGIN CODE ---
+{code}
+--- END CODE ---"""
+
+SECTION_DIVERSE_PROGRAMS = """\
+## Diverse Approaches (different strategies worth considering)
+
+{entries}"""
+
+SECTION_DIVERSE_PROGRAM_ENTRY = """\
+### Approach #{rank} ({fitness_label}: {success_rate})
+--- BEGIN CODE ---
+{code}
+--- END CODE ---"""
+
+SECTION_FAILURES = """\
+## Recent Failures (avoid these mistakes)
+
+{entries}"""
+
+SECTION_FAILURE_CRASH = """\
+### Failed Program #{rank}
+--- BEGIN CODE ---
+{code}
+--- END CODE ---
+**Crashed at: {stage_name}**
+Error: {error_message}
+Traceback (last {tb_lines} lines):
+{traceback}"""
+
+SECTION_FAILURE_LOW_FITNESS = """\
+### Low-Performing Program #{rank} ({fitness_label}: {success_rate})
+--- BEGIN CODE ---
+{code}
+--- END CODE ---
+This program ran but performed poorly."""
+
+SECTION_TRAINING_FEEDBACK = """\
+## Training Feedback for Parent
+
+{analysis}"""
+
+SECTION_INSPIRATION_PROGRAMS = """\
+## Inspiration Programs (structurally different strategies)
+
+Consider borrowing ideas from these, even if their success rates differ.
+
+{entries}"""
+
+SECTION_INSPIRATION_PROGRAM_ENTRY = """\
+### Alternative Strategy #{rank} ({fitness_label}: {success_rate})
+--- BEGIN CODE ---
+{code}
+--- END CODE ---"""
+
+
+# ---------------------------------------------------------------------------
+# Improvement guidance variants (for prompt stochasticity)
+# ---------------------------------------------------------------------------
+
+_IMPROVEMENT_VARIANTS = {
+    "zero": [
+        # Lens A: observation
+        (
+            "Zero success — the interface is not working at all.\n"
+            "Focus your changes on the OBSERVATION. The agent may lack "
+            "the information it needs to learn."
+        ),
+        # Lens B: reward
+        (
+            "Zero success — the interface is not working at all.\n"
+            "Focus your changes on the REWARD. The agent may have no "
+            "useful learning signal."
+        ),
+        # Lens C: structural reset
+        (
+            "Zero success — the interface is not working at all.\n"
+            "Try a STRUCTURALLY DIFFERENT approach to both the observation "
+            "and the reward. Break out of the current design direction."
+        ),
+    ],
+    "low": [
+        # Lens A: observation
+        (
+            "Low success rate — the agent struggles to learn.\n"
+            "Focus your changes on the OBSERVATION. It may be missing "
+            "critical information or containing misleading features."
+        ),
+        # Lens B: reward
+        (
+            "Low success rate — the agent struggles to learn.\n"
+            "Focus your changes on the REWARD. The learning signal "
+            "may be the bottleneck."
+        ),
+        # Lens C: coherence
+        (
+            "Low success rate — the agent struggles to learn.\n"
+            "Focus on whether the observation and reward work TOGETHER. "
+            "Does the reward incentivize behavior that the observation "
+            "can actually distinguish?"
+        ),
+    ],
+    "medium": [
+        # Lens A: failure modes
+        (
+            "Moderate success — partially working.\n"
+            "Focus on what causes the remaining failures. What states "
+            "or scenarios does the agent fail in?"
+        ),
+        # Lens B: simplification
+        (
+            "Moderate success — partially working.\n"
+            "Focus on SIMPLIFYING the interface. The current design may "
+            "have unnecessary complexity that hurts generalization."
+        ),
+        # Lens C: enrichment
+        (
+            "Moderate success — partially working.\n"
+            "Focus on what INFORMATION the agent might be missing for "
+            "the harder cases."
+        ),
+    ],
+    "good": [
+        # Lens A: failure analysis
+        (
+            "Good performance with room to improve.\n"
+            "Focus on the remaining failure cases. What distinguishes "
+            "them from successes?"
+        ),
+        # Lens B: simplification
+        (
+            "Good performance with room to improve.\n"
+            "Focus on whether the interface can be SIMPLIFIED without "
+            "losing performance."
+        ),
+        # Lens C: reward tuning
+        (
+            "Good performance with room to improve.\n"
+            "Focus your changes on the REWARD. The observation is likely "
+            "working — the reward signal may need refinement."
+        ),
+    ],
+    "excellent": [
+        # Lens A: targeted fixes
+        (
+            "Excellent performance. Small refinements only.\n"
+            "Focus on the rare failure cases. Avoid large structural "
+            "changes that might destabilize what works."
+        ),
+        # Lens B: compression
+        (
+            "Excellent performance. Small refinements only.\n"
+            "Focus on whether the interface can be made SIMPLER while "
+            "maintaining this success rate."
+        ),
+        # Lens C: robustness
+        (
+            "Excellent performance. Small refinements only.\n"
+            "Focus on ROBUSTNESS — does the interface handle all "
+            "possible states correctly?"
+        ),
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
+# Code extraction
+# ---------------------------------------------------------------------------
+
+
+def extract_code(response: str) -> Optional[str]:
+    """Extract Python code from the LLM response.
+
+    Multi-tier extraction (most specific → least):
+      1. ```python ... ``` fence
+      2. Any ``` ... ``` fence whose content looks like Python
+      3. Bare code starting with ``import jax`` (no fence at all)
+    Returns None only if all tiers fail.
+    """
+    # Tier 1: explicit ```python fence
+    match = _FENCE_PYTHON_RE.search(response)
+    if match:
+        return match.group(1).strip()
+
+    # Tier 2: any ``` fence containing Python-ish code
+    for match in _FENCE_ANY_RE.finditer(response):
+        code = match.group(1).strip()
+        if "import jax" in code or "def get_observation" in code or "def compute_reward" in code:
+            return code
+
+    # Tier 3: bare code (model forgot the fence entirely)
+    match = _BARE_CODE_RE.search(response)
+    if match:
+        return match.group(1).strip()
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# PromptBuilder
+# ---------------------------------------------------------------------------
+
+
+class PromptBuilder:
+    """Builds prompts for the LLM generation engine.
+
+    Usage:
+        builder = PromptBuilder(config, library_context, task_description,
+                                evolution_mode="full")
+
+        # From scratch (iteration 1 or new island):
+        prompt = builder.build_prompt()
+
+        # Evolutionary (improve on parent):
+        prompt = builder.build_prompt(
+            parent_code=parent.source_code,
+            parent_metrics={"success_rate": 0.5, "final_length": 95, ...},
+            failed_programs=[{"code": "...", "crash_result": CrashFilterResult(...)}],
+            top_programs=[{"code": "...", "metrics": {...}}],
+            best_metrics={"success_rate": 0.8, ...},
+        )
+
+        # Send to LLM:
+        response = llm.chat(system=prompt["system"], user=prompt["user"])
+        code = extract_code(response)
+    """
+
+    def __init__(
+        self,
+        config: PromptConfig,
+        library_context: str,
+        task_description: str,
+        evolution_mode: str = "full",
+        fitness_type: str = "success_rate",
+    ):
+        self.config = config
+        self.task_description = task_description
+        self.evolution_mode = evolution_mode
+        self.fitness_type = fitness_type
+        self.fitness_key = "final_return" if fitness_type == "reward" else "success_rate"
+
+        # Build mode-dependent content
+        function_description = _FUNCTION_DESC.get(
+            evolution_mode, _FUNCTION_DESC["full"]
+        )
+        output_constraints = _OUTPUT_CONSTRAINTS.get(
+            evolution_mode, _OUTPUT_CONSTRAINTS["full"]
+        )
+
+        if fitness_type == "reward":
+            reward_philosophy = (
+                "- The reward should provide a learning signal that maximizes the agent's "
+                "cumulative episode return. The agent IS evaluated on total reward.\n"
+                "- Higher episode return = better performance. Design reward components "
+                "that encourage the desired behavior.\n"
+                "- The reward can use any structure — dense shaping, velocity bonuses, "
+                "energy penalties, or combinations. Use what fits the task."
+            )
+        else:
+            reward_philosophy = (
+                "- The reward should provide a learning signal that guides the agent toward "
+                "completing the task. The agent is evaluated on task success rate (% of episodes "
+                "where the goal is reached), NOT on reward magnitude.\n"
+                "- Consider what sub-objectives or milestones exist in the task, and whether "
+                "rewarding progress toward them would help learning.\n"
+                "- The reward can use any structure — dense shaping, sparse bonuses, "
+                "milestone rewards, or combinations. Use what fits the task."
+            )
+
+        self._system_prompt = SYSTEM_PROMPT.format(
+            function_description=function_description,
+            reward_philosophy=reward_philosophy,
+            library_context=library_context,
+            output_constraints=output_constraints,
+        )
+
+    def _format_fitness(self, value: float) -> str:
+        """Format a fitness value based on fitness_type."""
+        if self.fitness_type == "reward":
+            return f"{value:.1f}"
+        return f"{value:.0%}"
+
+    def _fitness_label(self) -> str:
+        """Return the label for the fitness metric."""
+        if self.fitness_type == "reward":
+            return "fitness"
+        return "success rate"
+
+    def _get_obs_instructions(self) -> str:
+        """Return observation instructions based on mode."""
+        if self.evolution_mode == "reward_only":
+            return ""
+        return (
+            "**Observation design:**\n"
+            "- Decide what information from the environment state the agent needs "
+            "to solve this task.\n"
+            "- Compute all features from the current state — do NOT hardcode "
+            "any environment-specific constants.\n"
+            "- Refer to the library reference above for all available state fields.\n\n"
+        )
+
+    def _get_reward_instructions(self) -> str:
+        """Return reward instructions based on mode."""
+        if self.evolution_mode == "obs_only":
+            return ""
+        if self.fitness_type == "reward":
+            return (
+                "**Reward design:**\n"
+                "- Design a reward signal that will help the agent learn the task. "
+                "The agent is evaluated by the cumulative episode return (total reward).\n"
+                "- Higher episode return = better performance. The reward IS the fitness metric.\n"
+                "- Consider what sub-objectives help the agent maximize long-term return.\n"
+                "- AVOID reward hacking: do not reward proxies that can be maximized "
+                "without actually completing the task.\n\n"
+            )
+        return (
+            "**Reward design:**\n"
+            "- Design a reward signal that will help the agent learn the task. "
+            "Consider what milestones, progress measures, or completion signals "
+            "are appropriate for this task.\n"
+            "- The agent is evaluated on task success rate, not reward magnitude.\n"
+            "- AVOID reward hacking: do not reward proxies that can be maximized "
+            "without actually completing the task. The reward must track real progress.\n\n"
+        )
+
+    def _get_function_instructions(self) -> str:
+        """Return top-level function instructions based on mode."""
+        if self.evolution_mode == "reward_only":
+            return (
+                "Design a `compute_reward` function that will help a PPO "
+                "agent learn the task described above.\n"
+                "The observation is handled by the system — you only need to design the reward."
+            )
+        elif self.evolution_mode == "obs_only":
+            return (
+                "Design a `get_observation` function that will give a PPO agent "
+                "the information it needs to learn the task described above.\n"
+                "The reward uses the environment's built-in signal — you only need to design the observation."
+            )
+        else:
+            return (
+                "Design `get_observation` and `compute_reward` functions that will allow a PPO "
+                "agent to learn the task described above."
+            )
+
+    def _get_constraints(self) -> str:
+        """Return constraint lines based on mode."""
+        lines = []
+        if self.evolution_mode != "reward_only":
+            lines.append("- get_observation must return a 1D jnp.float32 array (max 512 elements)")
+        if self.evolution_mode != "obs_only":
+            lines.append("- compute_reward must return a scalar jnp.float32")
+        lines.append(
+            "- Do NOT hardcode environment-specific constants. "
+            "The environment is randomized — the interface must generalize"
+        )
+        if self.evolution_mode != "obs_only":
+            lines.append(
+                "- The reward must reflect actual task progress. Do not reward proxies "
+                "that can be maximized without completing the task (reward hacking)"
+            )
+        return "\n".join(lines)
+
+    def build_prompt(
+        self,
+        *,
+        parent_code: Optional[str] = None,
+        parent_metrics: Optional[Dict[str, Any]] = None,
+        parent_obs_dim: Optional[int] = None,
+        top_programs: Optional[List[Dict[str, Any]]] = None,
+        diverse_programs: Optional[List[Dict[str, Any]]] = None,
+        failed_programs: Optional[List[Dict[str, Any]]] = None,
+        best_metrics: Optional[Dict[str, Any]] = None,
+        inspiration_programs: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, str]:
+        """Build a system/user prompt pair for the LLM.
+
+        Args:
+            parent_code: Source code of the parent program. None = from-scratch.
+            parent_metrics: Training metrics of the parent (from run_training).
+            top_programs: Best programs from the population.
+                Each: {"code": str, "metrics": {"final_return": float, ...}}
+            diverse_programs: Programs from different MAP-Elites cells.
+                Same format as top_programs.
+            failed_programs: Recent failures to learn from.
+                Each: {"code": str, "crash_result": CrashFilterResult} for crashes,
+                or {"code": str, "metrics": {"final_return": float, ...}} for low-fitness.
+            best_metrics: Metrics of the overall best program, for comparison.
+            inspiration_programs: Structurally distant programs for exploration.
+                Same format as top_programs.
+
+        Returns:
+            {"system": str, "user": str} ready for the LLM API.
+        """
+        if parent_code is None:
+            user_msg = self._build_from_scratch(failed_programs=failed_programs)
+        else:
+            user_msg = self._build_evolutionary(
+                parent_code=parent_code,
+                parent_metrics=parent_metrics,
+                parent_obs_dim=parent_obs_dim,
+                top_programs=top_programs,
+                diverse_programs=diverse_programs,
+                failed_programs=failed_programs,
+                best_metrics=best_metrics,
+                inspiration_programs=inspiration_programs,
+            )
+        return {"system": self._system_prompt, "user": user_msg}
+
+    # ------------------------------------------------------------------
+    # From-scratch
+    # ------------------------------------------------------------------
+
+    def _build_from_scratch(
+        self, failed_programs: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        failure_section = ""
+        if failed_programs:
+            failure_section = self._format_failures(
+                failed_programs[: self.config.num_failure_examples]
+            )
+        return USER_PROMPT_FROM_SCRATCH.format(
+            task_description=self.task_description,
+            failure_section=failure_section,
+            function_instructions=self._get_function_instructions(),
+            obs_instructions=self._get_obs_instructions(),
+            reward_instructions=self._get_reward_instructions(),
+            constraints=self._get_constraints(),
+        )
+
+    # ------------------------------------------------------------------
+    # Evolutionary
+    # ------------------------------------------------------------------
+
+    def _build_evolutionary(
+        self,
+        *,
+        parent_code: str,
+        parent_metrics: Optional[Dict[str, Any]],
+        parent_obs_dim: Optional[int] = None,
+        top_programs: Optional[List[Dict[str, Any]]],
+        diverse_programs: Optional[List[Dict[str, Any]]],
+        failed_programs: Optional[List[Dict[str, Any]]],
+        best_metrics: Optional[Dict[str, Any]],
+        inspiration_programs: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        stochastic = self.config.use_stochasticity
+
+        # Parent section
+        parent_section = self._format_parent(parent_code, parent_metrics, obs_dim=parent_obs_dim)
+
+        # Feedback sections (only non-empty ones)
+        sections: List[str] = []
+
+        if failed_programs:
+            s = self._format_failures(
+                failed_programs[: self.config.num_failure_examples]
+            )
+            if s:
+                sections.append(s)
+
+        if top_programs:
+            progs = list(top_programs[: self.config.num_top_programs])
+            if stochastic:
+                random.shuffle(progs)
+            s = self._format_top_programs(progs)
+            if s:
+                sections.append(s)
+
+        if diverse_programs:
+            # Stochastic: 70% chance of including diverse programs
+            include_diverse = not stochastic or random.random() < 0.7
+            if include_diverse:
+                progs = list(diverse_programs[: self.config.num_diverse_programs])
+                if stochastic:
+                    random.shuffle(progs)
+                s = self._format_diverse_programs(progs)
+                if s:
+                    sections.append(s)
+
+        if inspiration_programs:
+            s = self._format_inspiration_programs(inspiration_programs)
+            if s:
+                sections.append(s)
+
+        if parent_metrics and best_metrics:
+            # Stochastic: 80% chance of including training feedback
+            include_feedback = not stochastic or random.random() < 0.8
+            if include_feedback:
+                s = self._format_training_feedback(parent_metrics, best_metrics)
+                if s:
+                    sections.append(s)
+
+        feedback_sections = "\n\n".join(sections)
+
+        # Improvement guidance
+        improvement_guidance = self._build_improvement_guidance(
+            parent_metrics, failed_programs, best_metrics
+        )
+
+        return USER_PROMPT_EVOLUTIONARY.format(
+            task_description=self.task_description,
+            parent_section=parent_section,
+            feedback_sections=feedback_sections,
+            improvement_guidance=improvement_guidance,
+            constraints=self._get_constraints(),
+        )
+
+    # ------------------------------------------------------------------
+    # Section formatters
+    # ------------------------------------------------------------------
+
+    def _format_parent(
+        self, code: str, metrics: Optional[Dict[str, Any]],
+        obs_dim: Optional[int] = None,
+    ) -> str:
+        if metrics:
+            fitness = metrics.get(self.fitness_key, 0.0)
+            fr = metrics.get("final_return", 0.0)
+            od = obs_dim or metrics.get("obs_dim", "?")
+            if self.fitness_type == "reward":
+                return (
+                    f"--- BEGIN CODE ---\n{code}\n--- END CODE ---\n"
+                    f"Fitness (episode return): {fr:.1f}  |  Obs dim: {od}"
+                )
+            return SECTION_PARENT_CODE.format(
+                code=code,
+                success_rate=f"{fitness:.0%}",
+                final_return=f"{fr:.1f}",
+                obs_dim=od,
+            )
+        return SECTION_PARENT_CODE_CRASHED.format(code=code)
+
+    def _format_top_programs(self, programs: List[Dict[str, Any]]) -> str:
+        if not programs:
+            return ""
+        entries = []
+        for i, prog in enumerate(programs, 1):
+            m = prog.get("metrics", {})
+            fitness = m.get(self.fitness_key, 0.0)
+            entries.append(
+                SECTION_TOP_PROGRAM_ENTRY.format(
+                    rank=i,
+                    fitness_label=self._fitness_label(),
+                    success_rate=self._format_fitness(fitness),
+                    code=prog["code"],
+                )
+            )
+        return SECTION_TOP_PROGRAMS.format(entries="\n\n".join(entries))
+
+    def _format_diverse_programs(self, programs: List[Dict[str, Any]]) -> str:
+        if not programs:
+            return ""
+        entries = []
+        for i, prog in enumerate(programs, 1):
+            m = prog.get("metrics", {})
+            fitness = m.get(self.fitness_key, 0.0)
+            entries.append(
+                SECTION_DIVERSE_PROGRAM_ENTRY.format(
+                    rank=i,
+                    fitness_label=self._fitness_label(),
+                    success_rate=self._format_fitness(fitness),
+                    code=prog["code"],
+                )
+            )
+        return SECTION_DIVERSE_PROGRAMS.format(entries="\n\n".join(entries))
+
+    def _format_inspiration_programs(self, programs: List[Dict[str, Any]]) -> str:
+        if not programs:
+            return ""
+        entries = []
+        for i, prog in enumerate(programs, 1):
+            m = prog.get("metrics", {})
+            fitness = m.get(self.fitness_key, 0.0)
+            entries.append(
+                SECTION_INSPIRATION_PROGRAM_ENTRY.format(
+                    rank=i,
+                    fitness_label=self._fitness_label(),
+                    success_rate=self._format_fitness(fitness),
+                    code=prog["code"],
+                )
+            )
+        return SECTION_INSPIRATION_PROGRAMS.format(entries="\n\n".join(entries))
+
+    def _format_failures(self, failures: List[Dict[str, Any]]) -> str:
+        if not failures:
+            return ""
+        entries = []
+        for i, fail in enumerate(failures, 1):
+            code = fail["code"]
+            crash: Optional[CrashFilterResult] = fail.get("crash_result")
+
+            if crash is not None and not crash.passed:
+                entries.append(self._format_crash_error(i, code, crash))
+            else:
+                m = fail.get("metrics", {})
+                fitness = m.get(self.fitness_key, 0.0)
+                entries.append(
+                    SECTION_FAILURE_LOW_FITNESS.format(
+                        rank=i,
+                        fitness_label=self._fitness_label(),
+                        success_rate=self._format_fitness(fitness),
+                        code=code,
+                    )
+                )
+        return SECTION_FAILURES.format(entries="\n\n".join(entries))
+
+    def _format_crash_error(
+        self, rank: int, code: str, crash: CrashFilterResult
+    ) -> str:
+        stage_name = STAGE_NAMES.get(
+            crash.stage_failed, f"Unknown stage {crash.stage_failed}"
+        )
+        raw_tb = crash.error_traceback or ""
+        traceback_text = self._truncate_traceback(raw_tb, max_lines=15)
+        tb_lines = min(15, len(raw_tb.strip().splitlines()))
+
+        return SECTION_FAILURE_CRASH.format(
+            rank=rank,
+            code=code,
+            stage_name=stage_name,
+            error_message=crash.error_message or "Unknown error",
+            tb_lines=tb_lines if tb_lines > 0 else "N/A",
+            traceback=traceback_text,
+        )
+
+    def _format_training_feedback(
+        self,
+        metrics: Dict[str, Any],
+        best_metrics: Dict[str, Any],
+    ) -> str:
+        fitness = metrics.get(self.fitness_key, 0.0)
+        best_fitness = best_metrics.get(self.fitness_key, 0.0)
+        final_return = metrics.get("final_return", 0.0)
+
+        parts: List[str] = []
+
+        # Core metrics
+        if self.fitness_type == "reward":
+            parts.append(f"- Parent fitness (episode return): {final_return:.1f}")
+            parts.append(f"- Best known fitness: {best_fitness:.1f}")
+        else:
+            parts.append(f"- Parent success rate: {fitness:.0%}")
+            parts.append(f"- Parent final reward: {final_return:.1f}")
+            parts.append(f"- Best known success rate: {best_fitness:.0%}")
+
+        # Per-seed stability (if available)
+        per_seed = metrics.get("per_seed_success")
+        if per_seed and len(per_seed) > 1:
+            seed_spread = max(per_seed) - min(per_seed)
+            if self.fitness_type == "reward":
+                seed_strs = [f"{s:.1f}" for s in per_seed]
+                parts.append(f"- Per-seed returns: [{', '.join(seed_strs)}] (spread: {seed_spread:.1f})")
+            else:
+                seed_strs = [f"{s:.0%}" for s in per_seed]
+                parts.append(f"- Per-seed success rates: [{', '.join(seed_strs)}] (spread: {seed_spread:.0%})")
+            if self.fitness_type == "reward":
+                if seed_spread > best_fitness * 0.3 and best_fitness > 0:
+                    parts.append(
+                        "- WARNING: High variance across seeds — the interface may be "
+                        "brittle or overly sensitive to initialization."
+                    )
+            else:
+                if seed_spread > 0.2:
+                    parts.append(
+                        "- WARNING: High variance across seeds — the interface may be "
+                        "brittle or overly sensitive to initialization."
+                    )
+
+        # NaN warning
+        if metrics.get("nan_detected"):
+            parts.append(
+                "- WARNING: NaN values appeared during training. The reward "
+                "function likely produces extreme or undefined values in some "
+                "states. Check for division by zero, log of negative numbers, "
+                "or unbounded reward terms."
+            )
+
+        # Performance bracket feedback
+        if self.fitness_type == "reward":
+            if fitness <= 0:
+                parts.append(
+                    "- The agent achieved zero or negative return. The current interface is not "
+                    "producing a useful learning signal. The observation, the reward, "
+                    "or both need significant changes."
+                )
+            elif best_fitness > 0 and fitness < best_fitness * 0.3:
+                parts.append(
+                    "- The agent's return is well below the best known. The interface "
+                    "is limiting learning. Consider whether the observation provides "
+                    "enough information, or whether the reward signal needs improvement."
+                )
+            elif best_fitness > 0 and fitness < best_fitness * 0.6:
+                parts.append(
+                    "- Moderate performance. The interface is partially working. "
+                    "Consider what improvements could increase the return further."
+                )
+            elif best_fitness > 0 and fitness < best_fitness * 0.9:
+                parts.append(
+                    "- Good return with room to improve. Focus on what might be "
+                    "limiting further improvement."
+                )
+        else:
+            if fitness == 0:
+                parts.append(
+                    "- The agent NEVER succeeded. The current interface is not "
+                    "producing a useful learning signal. The observation, the reward, "
+                    "or both need significant changes."
+                )
+            elif fitness < 0.3:
+                parts.append(
+                    "- The agent rarely succeeds. The interface is limiting learning. "
+                    "Consider whether the observation provides enough information, "
+                    "or whether the reward signal is misleading or too weak."
+                )
+            elif fitness < 0.6:
+                parts.append(
+                    "- The agent succeeds sometimes but not reliably. The interface "
+                    "is partially working. Consider what causes the remaining "
+                    "failures — missing observation features? Conflicting reward "
+                    "signals? Unhandled edge cases?"
+                )
+            elif fitness < 0.9:
+                parts.append(
+                    "- Good success rate with room to improve. Focus on what causes "
+                    "the remaining failures."
+                )
+
+        # Plateau detection
+        if self.fitness_type == "reward":
+            if best_fitness > 0 and abs(fitness - best_fitness) / max(best_fitness, 1e-6) < 0.05:
+                parts.append(
+                    "- NOTE: The parent is near the best known fitness, "
+                    "suggesting the current approach may be plateauing. Consider "
+                    "trying a structurally different interface design."
+                )
+        else:
+            if best_fitness > 0 and abs(fitness - best_fitness) < 0.05:
+                parts.append(
+                    "- NOTE: The parent is near the best known success rate, "
+                    "suggesting the current approach may be plateauing. Consider "
+                    "trying a structurally different interface design."
+                )
+
+        # Reward curve trend
+        reward_curve = metrics.get("learning_curve", [])
+        if len(reward_curve) >= 4:
+            half = len(reward_curve) // 2
+            early_reward = sum(reward_curve[:half]) / half
+            late_reward = sum(reward_curve[half:]) / (len(reward_curve) - half)
+            if late_reward > early_reward * 1.5 and early_reward > 0:
+                parts.append(
+                    f"- Reward is increasing (early avg: {early_reward:.1f}, "
+                    f"late avg: {late_reward:.1f}) — learning is progressing."
+                )
+            elif late_reward < early_reward * 0.5 and early_reward > 0:
+                parts.append(
+                    f"- Reward is DECLINING (early avg: {early_reward:.1f}, "
+                    f"late avg: {late_reward:.1f}) — training may be unstable "
+                    "or the reward has optimization issues."
+                )
+
+        # Success curve trend
+        curve = metrics.get("success_curve", [])
+        if len(curve) >= 3:
+            third = max(len(curve) // 3, 1)
+            early = sum(curve[:third]) / third
+            late = sum(curve[-third:]) / third
+            if late > early + 0.1:
+                parts.append(
+                    "- Success rate is still improving at the end of training — "
+                    "the interface shows promise and could benefit from refinement."
+                )
+            elif late < early - 0.1:
+                parts.append(
+                    "- Success rate is DECLINING — training is unstable. "
+                    "The reward signal may be causing optimization issues."
+                )
+            elif late < 0.05 and fitness < 0.05:
+                parts.append(
+                    "- Success rate stays near zero throughout training. "
+                    "The current interface is not working — try something "
+                    "structurally different."
+                )
+
+        analysis = "\n".join(parts)
+        return SECTION_TRAINING_FEEDBACK.format(analysis=analysis)
+
+    def _build_improvement_guidance(
+        self,
+        parent_metrics: Optional[Dict[str, Any]],
+        failed_programs: Optional[List[Dict[str, Any]]],
+        best_metrics: Optional[Dict[str, Any]],
+    ) -> str:
+        hints: List[str] = []
+        stochastic = self.config.use_stochasticity
+
+        # Check for crash failures
+        has_crashes = False
+        if failed_programs:
+            for f in failed_programs:
+                cr: Optional[CrashFilterResult] = f.get("crash_result")
+                if cr and not cr.passed:
+                    has_crashes = True
+                    break
+
+        if has_crashes:
+            hints.append(
+                "Some recent attempts crashed. Study the error messages "
+                "carefully and ensure your code is JAX-traceable. Common "
+                "issues:\n"
+                "  - Using Python if/else on JAX arrays (use jax.lax.select "
+                "instead)\n"
+                "  - Wrong attribute access on the state object\n"
+                "  - Shape mismatches in jnp.concatenate\n"
+                "  - Using numpy instead of jax.numpy"
+            )
+
+        if parent_metrics:
+            fitness = parent_metrics.get(self.fitness_key, 0.0)
+            best_fitness = best_metrics.get(self.fitness_key, 0.0) if best_metrics else 0.0
+
+            if self.fitness_type == "reward":
+                # For reward-based fitness, bracket relative to best
+                if fitness <= 0:
+                    bracket = "zero"
+                elif best_fitness > 0 and fitness < best_fitness * 0.3:
+                    bracket = "low"
+                elif best_fitness > 0 and fitness < best_fitness * 0.6:
+                    bracket = "medium"
+                elif best_fitness > 0 and fitness < best_fitness * 0.9:
+                    bracket = "good"
+                elif best_fitness > 0:
+                    bracket = "excellent"
+                else:
+                    bracket = "low"  # No best reference yet
+            else:
+                if fitness == 0:
+                    bracket = "zero"
+                elif fitness < 0.3:
+                    bracket = "low"
+                elif fitness < 0.6:
+                    bracket = "medium"
+                elif fitness < 0.9:
+                    bracket = "good"
+                else:
+                    bracket = "excellent"
+
+            variants = _IMPROVEMENT_VARIANTS[bracket]
+            if stochastic:
+                hints.append(random.choice(variants))
+            else:
+                hints.append(variants[0])
+
+            # Plateau detection
+            if self.fitness_type == "reward":
+                if best_fitness > 0 and abs(fitness - best_fitness) / max(best_fitness, 1e-6) < 0.1:
+                    hints.append(
+                        "**PLATEAU DETECTED**: The population has stagnated near "
+                        f"fitness {best_fitness:.1f}. Try a STRUCTURALLY DIFFERENT "
+                        "interface design — different observation representation, "
+                        "different reward structure, or both."
+                    )
+            else:
+                if best_fitness > 0 and abs(fitness - best_fitness) < 0.1 and best_fitness < 0.85:
+                    hints.append(
+                        "**PLATEAU DETECTED**: The population has stagnated near "
+                        f"{best_fitness:.0%} success. Try a STRUCTURALLY DIFFERENT "
+                        "interface design — different observation representation, "
+                        "different reward structure, or both."
+                    )
+
+        if not hints:
+            hints.append(
+                "Think carefully about what information the agent needs to "
+                "solve this task (observation) and what learning signal will "
+                "guide it toward the goal (reward)."
+            )
+
+        return "\n\n".join(hints)
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _truncate_traceback(tb: str, max_lines: int = 15) -> str:
+        """Keep only the last max_lines of a traceback (most informative)."""
+        lines = tb.strip().splitlines()
+        if len(lines) <= max_lines:
+            return tb.strip()
+        truncated = lines[-max_lines:]
+        return "    ... (earlier frames omitted) ...\n" + "\n".join(truncated)
