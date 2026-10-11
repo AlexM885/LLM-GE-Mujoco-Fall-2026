@@ -18,8 +18,16 @@ export SERVER_HOSTNAME=$(hostname)
 export HF_HOME=/storage/ice-shared/vip-vvk/llm_storage/
 export LLMGE_PORT="${LLMGE_PORT:-8169}"
 
+# Trainer config for this island (ppo | xqc); exported so the LLM and evaluation
+# jobs that run_improved.py submits read the same constants. Example:
+#   LLMGE_ALGO=xqc LLMGE_RUN=xqc_island_run LLMGE_POP_SIZE=16 sbatch run.sh
+export LLMGE_ALGO="${LLMGE_ALGO:-ppo}"
+RUN="${LLMGE_RUN:-mujoco_islands_run}"
+if [ "$LLMGE_ALGO" = xqc ]; then PROMPT_GROUP=Mujoco/XQC; else PROMPT_GROUP=Mujoco/Normal; fi
+echo "algo=$LLMGE_ALGO run=$RUN prompts=$PROMPT_GROUP pop=${LLMGE_POP_SIZE:-32}"
+
 uv run python run_improved.py \
-	--checkpoints mujoco_islands_run/island_llama3_Mujoco-Normal \
-	--global_path mujoco_islands_run/global_data \
+	--checkpoints "$RUN/island_llama3_${PROMPT_GROUP//\//-}" \
+	--global_path "$RUN/global_data" \
 	--llm_model llama3 \
-	--prompt_group Mujoco/Normal
+	--prompt_group "$PROMPT_GROUP"

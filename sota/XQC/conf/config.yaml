@@ -30,6 +30,7 @@ keep_checkpoints: 2           # newest complete checkpoints kept on disk
 save_replay_buffer: true      # false = smaller checkpoints, but resume restarts with an empty buffer
 max_runtime_s:                # optional self-imposed limit per job; checkpoint and exit when reached
 resume: auto                  # auto = resume if a checkpoint exists, never = refuse if one exists
+final_descriptors: false      # true = write descriptors.json (MAP-Elites) after max_steps (LLM-GE)
 
 wandb:
   project_name: XQC

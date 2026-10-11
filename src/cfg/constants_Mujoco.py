@@ -134,6 +134,42 @@ EVAL_RUNLINE = (
 )
 EVAL_NO_PROGRESS_TIMEOUT_SECONDS = int(os.getenv("LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS", str(40 * 60)))
 
+#: Trainer config the genes of this run use: "ppo" (sota/MujocoRL, the default
+#: above) or "xqc" (sota/XQC/llmge). Set LLMGE_ALGO in the environment that starts
+#: run_improved.py; sbatch passes it on to the LLM and evaluation jobs, so every
+#: process of an island agrees on the seed gene, prompts, rules and trainer.
+LLMGE_ALGO = os.getenv("LLMGE_ALGO", "ppo")
+if LLMGE_ALGO == "xqc":
+    SOTA_ROOT = os.path.join(ROOT_DIR, "sota/XQC/llmge")
+    SEED_NETWORK = os.path.join(SOTA_ROOT, "network.py")
+    VARIANT_DIR = os.path.join(SOTA_ROOT, "models")
+    TRAIN_FILE = "sota/XQC/train_xqc_gene.py"
+    DEFAULT_PROMPT_GROUP = "Mujoco/XQC"
+    PROMPTS = f"templates/{DEFAULT_PROMPT_GROUP}/*.txt"
+    CONSTANT_RULES_PATH = "templates/Mujoco/XQC_ConstantRules.txt"
+    #: Per-individual budget: steps x seeds (seeds train batched in one process).
+    XQC_EVAL_TIMESTEPS = int(os.getenv("XQC_EVAL_TIMESTEPS", "100000"))
+    XQC_EVAL_SEEDS = int(os.getenv("XQC_EVAL_SEEDS", "3"))
+    FORBIDDEN_PATTERNS = [
+        ("import ", "XQC genes return plain dicts; no imports"),
+        ("open(", "file access"),
+        ("exec(", "dynamic code"),
+        ("eval(", "dynamic code"),
+        ("__", "dunder access"),
+        ("class ", "XQC genes define no classes"),
+    ]
+    # train_xqc_gene.py runs in the XQC JAX venv (sota/XQC/pace/env.sh activates it).
+    EVAL_RUNLINE = (
+        "export XQC_REPO=$PWD && source sota/XQC/pace/env.sh && python {} "
+        "-network models.{} "
+        f"-timesteps {XQC_EVAL_TIMESTEPS} -num_seeds {XQC_EVAL_SEEDS} "
+        f"-eval_episodes {MUJOCO_EVAL_EPISODES}"
+    )
+    # Counted from submission, so it includes queue time.
+    EVAL_NO_PROGRESS_TIMEOUT_SECONDS = int(os.getenv("LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS", str(6 * 60 * 60)))
+elif LLMGE_ALGO != "ppo":
+    raise ValueError(f"LLMGE_ALGO={LLMGE_ALGO!r}: expected 'ppo' or 'xqc'")
+
 #: LLM GPU constraint string for SLURM
 LLM_GPU = 'nvidia-gpu'
 
@@ -198,9 +234,9 @@ NUM_EOT_ELITES = 1
 GENERATION = 0
 PROB_QC = 0.0
 PROB_EOT = 0.0  # Disable EoT for initial RL runs (needs prior elite genes)
-num_generations = 30  # Number of generations
-start_population_size = 32  # Starting population size
-population_size = 32  # Population size each generation
+num_generations = int(os.getenv("LLMGE_NUM_GENERATIONS", "30"))  # Number of generations
+start_population_size = int(os.getenv("LLMGE_POP_SIZE", "32"))  # Starting population size
+population_size = int(os.getenv("LLMGE_POP_SIZE", "32"))  # Population size each generation
 crossover_probability = 0.35  # Probability of mating two individuals
 mutation_probability = 0.8  # Probability of mutating an individual
 num_elites = 8
@@ -220,7 +256,9 @@ MAP_BINS = 20
 #: re-dimension the archive - get_bin() adapts to however many entries it has.
 MAP_ELITES_DESCRIPTORS = [
     ("mean_distance", -500.0, 2000.0),   # reasonable for HalfCheetah
-    ("mean_control_cost", 0.0, 10.0),
+    # Per-step HalfCheetah control cost is 0.1 * ||a||^2 <= 0.6 (6 actions in [-1, 1]);
+    # the old 0-10 range put every individual in the bottom 2 of 20 bins.
+    ("mean_control_cost", 0.0, 0.6),
 ]
 #: Results column that ranks occupants competing for the same cell (maximised).
 MAP_ELITES_OBJECTIVE = "mean_reward"

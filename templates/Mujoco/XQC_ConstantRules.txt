@@ -1,0 +1,13 @@
+Mujoco RL (XQC) hard rules:
+1. Return exactly one complete Python code block and no prose outside the code block.
+2. This code will replace only the shown chunk inside sota/XQC/llmge/network.py; keep the chunk self-contained.
+3. The chunk defines exactly one function, either get_architecture_kwargs() or get_xqc_kwargs(), with the same name as the shown chunk, and that function returns a dict literal.
+4. Do not write imports, classes, training loops, evaluation loops, file I/O, prints, or any other code. Only change dict keys and values.
+5. Values must be plain Python literals: ints, floats, True/False, or lists of ints. No numpy, jax, torch, math, or variables.
+6. Allowed keys for get_architecture_kwargs(): hidden_dims_critic (1-8 ints, each 1-4096), hidden_dims_actor (1-8 ints, each 1-4096), n_critics (int 1-10), use_batch_norm, use_weight_norm, use_layer_norm, pre_activation_bn, normalize_last_layer, skip_connections (all True/False).
+7. Allowed keys for get_xqc_kwargs(): actor_lr, critic_lr, temp_lr (floats 1e-6 to 1e-2), lr_end (float 1e-7 to 1e-2), tau (float 1e-4 to 1.0), policy_delay (int 1-10), init_temperature (float 1e-4 to 10), weight_decay (float 0-1), batch_size (int 16-2048), updates_per_step (int 1-4).
+8. Any other key, or a value outside its range, makes the gene invalid. Keys may be omitted to use the XQC default.
+9. HalfCheetah-v4 observations have 17 features and actions have 6 dimensions; the agent builds the input and output layers itself.
+10. Do not leave ellipses, placeholders, TODOs, comments in place of values, or markdown inside the Python code.
+
+Let us think through this step by step:

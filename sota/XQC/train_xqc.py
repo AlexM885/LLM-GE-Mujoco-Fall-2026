@@ -10,6 +10,7 @@ Same training loop as upstream train_parallel.py, plus:
       train_metrics.jsonl
       summary.json    written/updated at every eval
       DONE            created once max_steps is reached
+      descriptors.json  MAP-Elites descriptors at max_steps (only with final_descriptors=true)
 
 Exit codes: 0 = finished or checkpointed on request, anything else = failure.
 
@@ -38,6 +39,7 @@ RESUME_MUTABLE_KEYS = {
     "run_dir", "checkpoint_interval", "keep_checkpoints", "max_runtime_s", "resume",
     "eval_interval", "eval_episodes", "log_interval", "log_interval_condition_number",
     "eval_video", "eval_video_fps", "eval_video_frameskip", "eval_video_num_envs", "wandb",
+    "final_descriptors",
 }
 
 EVAL_FIELDS = ["env", "seed", "env_step", "return", "wall_time_s", "slurm_job_id"]
@@ -349,6 +351,18 @@ def main(cfg: DictConfig):
 
         # Reached max_steps
         save_checkpoint(last_i)
+        if cfg.get("final_descriptors"):
+            from llmge_descriptors import rollout_descriptors
+            desc = rollout_descriptors(agent, cfg.env.name, cfg.num_seeds, num_episodes=cfg.eval_episodes,
+                                       seed=cfg.seed + 42, action_repeat=cfg.env.action_repeat)
+            import jax
+            # Actor parameters are stacked over seeds (vmap); report one seed's count.
+            actor_params = sum(x.size for x in jax.tree_util.tree_leaves(agent.actor.params)) // cfg.num_seeds
+            with open(os.path.join(run_dir, "descriptors.json"), "w") as f:
+                json.dump({"env_step": last_i * cfg.env.action_repeat, "actor_params": int(actor_params),
+                           **desc}, f, indent=2)
+            print(f"[descriptors] distance={desc['mean_distance']:.1f} "
+                  f"ctrl_cost={desc['mean_control_cost']:.4f}", flush=True)
         with open(os.path.join(run_dir, "DONE"), "w") as f:
             f.write(f"env_step={last_i * cfg.env.action_repeat}\njob={job_id}\n")
         print(f"[done] reached max_steps={cfg.max_steps}, wrote {run_dir}/DONE", flush=True)
