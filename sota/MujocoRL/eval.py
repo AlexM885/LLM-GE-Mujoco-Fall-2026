@@ -182,7 +182,7 @@ def _feet_in_contact(env, foot_geom_ids):
     return touching
 
 
-def evaluate_model(model, env, num_episodes=10, max_steps=1000):
+def evaluate_model(model, env, num_episodes=10, max_steps=1000, seed=None):
     """
     Run evaluation episodes on a trained model.
 
@@ -196,6 +196,10 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000):
         Number of evaluation episodes to run.
     max_steps : int
         Maximum steps per episode.
+    seed : int, optional
+        Base seed for episode resets. Episode ``ep`` is reset with
+        ``seed + ep`` so episodes differ from each other but are identical
+        across runs with the same seed. ``None`` leaves resets unseeded.
 
     Returns
     -------
@@ -229,7 +233,10 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000):
     contact_fractions = [[] for _ in foot_geom_ids]
 
     for ep in range(num_episodes):
-        obs, reset_info = env.reset()
+        if seed is not None:
+            obs, reset_info = env.reset(seed=seed + ep)
+        else:
+            obs, reset_info = env.reset()
         done = False
         total_reward = 0
         step_count = 0
@@ -342,6 +349,8 @@ def main():
                         help="Number of evaluation episodes")
     parser.add_argument("--max-steps", type=int, default=1000,
                         help="Maximum steps per episode")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Base seed for episode resets (episode ep uses seed + ep)")
     args = parser.parse_args()
 
     env_id = args.env
@@ -360,7 +369,7 @@ def main():
     print(f"  Evaluating {args.episodes} episodes on {env_id}")
     print(f"{'='*50}")
     mean_reward, std_reward, rewards, metrics = evaluate_model(
-        model, env, num_episodes=args.episodes, max_steps=args.max_steps
+        model, env, num_episodes=args.episodes, max_steps=args.max_steps, seed=args.seed
     )
 
     print(f"\n{'='*50}")

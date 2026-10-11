@@ -541,9 +541,9 @@ def check4results(gene_id):
     job_done = check4error(gene_id)
     if job_done is True:
         out_dir = os.path.join(OUTPUT_DIR, str(GENERATION))
-        # The job saves the model results to a file f'{gene_id}_results.csv'
-        # results_path = os.path.join(out_dir, f'{gene_id}_results.csv')
-        results_path = f'{SOTA_ROOT}/results/{gene_id}_results.csv'
+        # The job saves the model results to a file f'{gene_id}_seed{MUJOCO_EVAL_SEED}_results.csv'
+        # (train_rl.py namespaces results by seed; see EVAL_RUNLINE in constants_Mujoco.py)
+        results_path = f'{SOTA_ROOT}/results/{gene_id}_seed{MUJOCO_EVAL_SEED}_results.csv'
         with open(results_path, 'r') as file:
             lines = [line.strip() for line in file.readlines() if line.strip()]
         # Skip header line (first line) and parse data line (second line)
