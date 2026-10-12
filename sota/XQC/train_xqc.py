@@ -39,7 +39,7 @@ RESUME_MUTABLE_KEYS = {
     "run_dir", "checkpoint_interval", "keep_checkpoints", "max_runtime_s", "resume",
     "eval_interval", "eval_episodes", "log_interval", "log_interval_condition_number",
     "eval_video", "eval_video_fps", "eval_video_frameskip", "eval_video_num_envs", "wandb",
-    "final_descriptors",
+    "final_descriptors", "final_video", "video_steps",
 }
 
 EVAL_FIELDS = ["env", "seed", "env_step", "return", "wall_time_s", "slurm_job_id"]
@@ -363,6 +363,12 @@ def main(cfg: DictConfig):
                            **desc}, f, indent=2)
             print(f"[descriptors] distance={desc['mean_distance']:.1f} "
                   f"ctrl_cost={desc['mean_control_cost']:.4f}", flush=True)
+        if cfg.get("final_video"):
+            from llmge_descriptors import record_videos
+            returns = record_videos(agent, cfg.env.name, cfg.num_seeds, cfg.final_video, steps=cfg.video_steps,
+                                    seed=cfg.seed + 42, action_repeat=cfg.env.action_repeat)
+            print(f"[video] wrote {cfg.num_seeds} gifs to {cfg.final_video}, returns {returns.round(1).tolist()}",
+                  flush=True)
         with open(os.path.join(run_dir, "DONE"), "w") as f:
             f.write(f"env_step={last_i * cfg.env.action_repeat}\njob={job_id}\n")
         print(f"[done] reached max_steps={cfg.max_steps}, wrote {run_dir}/DONE", flush=True)

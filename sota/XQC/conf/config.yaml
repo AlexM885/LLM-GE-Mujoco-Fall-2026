@@ -31,6 +31,8 @@ save_replay_buffer: true      # false = smaller checkpoints, but resume restarts
 max_runtime_s:                # optional self-imposed limit per job; checkpoint and exit when reached
 resume: auto                  # auto = resume if a checkpoint exists, never = refuse if one exists
 final_descriptors: false      # true = write descriptors.json (MAP-Elites) after max_steps (LLM-GE)
+final_video: ""               # directory: save one deterministic rollout gif per seed after max_steps
+video_steps: 300              # env steps per gif (HalfCheetah: 20 steps/s)
 
 wandb:
   project_name: XQC
