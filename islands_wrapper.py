@@ -7,7 +7,9 @@ from deap.tools import HallOfFame
 import subprocess
 import time
 import networkx as nx
+import itertools
 from run_improved import load_checkpoint, save_checkpoint, extract_generation
+from run_improved import count_successful_evals, MAX_SUCCESSFUL_EVALS
 from islands import Individual, Island, Topology, migrate, generate_graph_topology
 from src.cfg.constants import *
 from src.utils.print_utils import box_print
@@ -251,6 +253,13 @@ def get_generation(global_path):
 
     return max_gen if max_gen > 0 else 1
 
+def get_successful_evals(global_path):
+    """Number of successfully trained genes recorded in the latest global data file."""
+    _, _, global_data = load_checkpoint(folder_name=global_path, global_path=global_path)
+    if not global_data:
+        return 0
+    return count_successful_evals(global_data.get("GLOBAL_DATA", {}), global_data.get("GLOBAL_DATA_HIST", {}))
+
 # Island Controller Script to handle creating islands and migrating individuals between them.
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run Generation')
@@ -326,7 +335,17 @@ if __name__ == "__main__":
     # start generation
     curr_gen = get_generation(global_path)
     start_era = curr_gen // migration_gen + 1 if migration_gen != 0 else 1
-    for era in range(start_era, 2 if migration_gen == 0 else start_era + num_generations // migration_gen):
+    eras = range(start_era, 2 if migration_gen == 0 else start_era + num_generations // migration_gen)
+    if MAX_SUCCESSFUL_EVALS and migration_gen != 0:
+        # With an evaluation budget the run ends when it is spent, not after num_generations.
+        eras = itertools.count(start_era)
+    successful_evals = get_successful_evals(global_path) if MAX_SUCCESSFUL_EVALS else 0
+    for era in eras:
+        if MAX_SUCCESSFUL_EVALS:
+            print(f"Successful evals: {successful_evals}/{MAX_SUCCESSFUL_EVALS}", flush=True)
+            if successful_evals >= MAX_SUCCESSFUL_EVALS:
+                print("Evaluation budget reached, ending the run", flush=True)
+                break
         print("Starting era " + str(era), flush=True)
         job_ids = []
 
@@ -356,5 +375,13 @@ if __name__ == "__main__":
             migrateIslands(topology, island_specs, checkpoints, era * migration_gen)
 
         print("Finished era " + str(era), flush=True)
+
+        if MAX_SUCCESSFUL_EVALS:
+            previous_successful_evals = successful_evals
+            successful_evals = get_successful_evals(global_path)
+            if successful_evals == previous_successful_evals:
+                # Nothing trained for a whole era; stop instead of looping forever.
+                print("No successful evals in this era, ending the run before the budget is reached", flush=True)
+                break
     
     print("Finished evolutionary loop")

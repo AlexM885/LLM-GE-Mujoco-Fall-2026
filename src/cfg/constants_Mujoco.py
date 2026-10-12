@@ -40,6 +40,12 @@ MUJOCO_ENV_ID = os.getenv("MUJOCO_ENV_ID", "Walker2d-v5")
 MUJOCO_EVAL_TIMESTEPS = int(os.getenv("MUJOCO_EVAL_TIMESTEPS", "500000"))
 MUJOCO_EVAL_EPISODES = int(os.getenv("MUJOCO_EVAL_EPISODES", "10"))
 MUJOCO_EVAL_MAX_STEPS = int(os.getenv("MUJOCO_EVAL_MAX_STEPS", "1000"))
+#: Environment-step budget of a whole run, matched by --max_timesteps of the
+#: PGA-MAP-Elites baseline. Only genes that trained successfully are charged,
+#: MUJOCO_EVAL_TIMESTEPS each, so the run ends after MAX_SUCCESSFUL_EVALS of
+#: them rather than after num_generations. Set to 0 to disable the budget.
+MUJOCO_TOTAL_TIMESTEPS = int(os.getenv("MUJOCO_TOTAL_TIMESTEPS", "96000000"))
+MAX_SUCCESSFUL_EVALS = MUJOCO_TOTAL_TIMESTEPS // MUJOCO_EVAL_TIMESTEPS
 
 #: Output directory for intermediate generation data
 OUTPUT_DIR = "mujoco_rl_output"

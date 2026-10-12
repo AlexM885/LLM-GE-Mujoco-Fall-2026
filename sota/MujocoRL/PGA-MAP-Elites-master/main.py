@@ -1,18 +1,24 @@
+import os
+# One thread per process, the parallelism comes from the evaluation/variation processes
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 import numpy as np
 import torch
-import gym
-gym.logger.set_level(40)
-import QDgym
 import argparse
 from sklearn.neighbors import KDTree
 import multiprocessing as multiprocessing
 from functools import partial
-import os
+import contextlib
+import time
 
 from utils import *
 from networks import Actor, Critic
 from variational_operators import VariationalOperator
 from vectorized_env import ParallelEnv
+from qd_mujoco_env import QDMujocoEnv, DEFAULT_ENV_ID
+# Same evaluation code as train_rl.py (qd_mujoco_env puts sota/MujocoRL on the path)
+from eval import evaluate_model
 
 
 class LoadFromFile(argparse.Action):
@@ -21,24 +27,74 @@ class LoadFromFile(argparse.Action):
 			parser.parse_args([s.strip("\n") for s in f.readlines()], namespace)
 
 
-def make_env(env_id):
-    env = gym.make(env_id)
+def make_env(env_id, max_episode_steps):
+    env = QDMujocoEnv(env_id, max_episode_steps)
     return env
+
+
+class ActorPolicy(object):
+	'''Gives an Actor the predict() interface that eval.evaluate_model expects'''
+	def __init__(self, actor):
+		self.actor = actor
+
+	def predict(self, obs, deterministic=True):
+		return self.actor.select_action(np.array(obs)), None
+
+
+def final_evaluation(archive, args, file_name, start_time):
+	'''
+	Re-evaluate every solution of the final archive with the protocol of train_rl.py
+	(eval.evaluate_model) and save the results with the same columns as its results csv.
+	'''
+	env = make_env(args.env, args.max_episode_steps)
+	rows = []
+	for s in archive.values():
+		with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+			mean_reward, std_reward, _, metrics = evaluate_model(ActorPolicy(s.x),
+																env.env,
+																num_episodes=args.final_eval_episodes,
+																max_steps=args.max_episode_steps)
+		param_count = sum(p.numel() for p in s.x.parameters())
+		rows.append((mean_reward,
+					std_reward,
+					time.time() - start_time,
+					param_count,
+					metrics["mean_distance"],
+					metrics["mean_control_cost"],
+					metrics.get("foot_contact_0", 0.0),
+					metrics.get("foot_contact_1", 0.0),
+					metrics["mean_return_forward"],
+					metrics["mean_return_healthy"],
+					metrics["mean_return_ctrl"],
+					s.x.id,
+					s.fitness))
+	env.close()
+	rows.sort(key=lambda row: row[0], reverse=True)
+	with open(f"{args.save_path}/results_{file_name}.csv", "w") as f:
+		f.write("mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost,foot_contact_0,foot_contact_1,mean_return_forward,mean_return_healthy,mean_return_ctrl,actor_id,archive_fitness\n")
+		for row in rows:
+			f.write(",".join(str(x) for x in row) + "\n")
+	print(f"Final evaluation ({args.final_eval_episodes} episodes each) of {len(rows)} solutions")
+	print(f"Best mean reward: {rows[0][0]}, Std: {rows[0][1]}, Params: {rows[0][3]}, FootContact: ({rows[0][6]:.3f}, {rows[0][7]:.3f})")
 
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser()
 	parser.add_argument('--config_file', type=open, action=LoadFromFile)    # Config file to load args (Typically you would only specifiy this arg)
-	parser.add_argument("--env", default="QDAntBulletEnv-v0")       	# Environment name (only QDgym envs will run)
+	parser.add_argument("--env", default=DEFAULT_ENV_ID)            	# Environment name (Gymnasium MuJoCo env, same as train_rl.py)
 	parser.add_argument("--seed", default=0, type=int)              	# Seed
 	parser.add_argument("--save_path", default=".")                 	# Path where to save results
+	parser.add_argument("--max_episode_steps", default=int(os.getenv("MUJOCO_EVAL_MAX_STEPS", "1000")), type=int)	# Max steps per episode (same as train_rl.py)
+	parser.add_argument("--max_timesteps", default=int(os.getenv("MUJOCO_EVAL_TIMESTEPS", "500000")), type=int)	# Budget of environment steps (same as the timesteps of train_rl.py)
+	parser.add_argument("--max_hours", default=0, type=float)			# Wall-clock limit of the search in hours (0 = none). The run then stops early and still saves its archive
+	parser.add_argument("--final_eval_episodes", default=int(os.getenv("MUJOCO_EVAL_EPISODES", "10")), type=int)	# Episodes per solution in the final evaluation of the archive (0 to skip)
 	##########################################################################################################
 	########################## QD PARAMS #####################################################################
 	##########################################################################################################
-	parser.add_argument("--dim_map", default=4, type=int)			# Dimentionality of behaviour space
-	parser.add_argument("--n_niches", default=1296, type=int)		# nr of niches/cells of behaviour
+	parser.add_argument("--dim_map", default=2, type=int)			# Dimentionality of behaviour space
+	parser.add_argument("--n_niches", default=1024, type=int)		# nr of niches/cells of behaviour
 	parser.add_argument("--n_species", default=1, type=int)			# nr of species/cells in species archive (The species archive is disabled in the GECCO paper by setting n_species=1. See readme for details)
-	parser.add_argument("--max_evals", default=1e6, type=int)		# nr of evaluations (I) 
+	parser.add_argument("--max_evals", default=1e6, type=int)		# nr of evaluations (I). The run stops at max_timesteps or max_evals, whichever is reached first
 	parser.add_argument("--mutation_op", default=None)			# Mutation operator to use (Set to None in GECCO paper)
 	parser.add_argument("--crossover_op", default="iso_dd")			# Crossover operator to use (Set to iso_dd aka directional variation in GECCO paper which uses mutation and crossover in one)
 	parser.add_argument("--min_genotype", default=False)            	# Minimum value a gene in the genotype can take (if False no limit) (Set to False in GECCO paper)
@@ -95,10 +151,10 @@ if __name__ == "__main__":
 	
 	# make folders
 	if not os.path.exists(f"{args.save_path}"):
-		os.mkdir(f"{args.save_path}")
-		os.mkdir(f"{args.save_path}/models/")
+		os.makedirs(f"{args.save_path}")
+		os.makedirs(f"{args.save_path}/models/")
 	if not os.path.exists(f"{args.save_path}/models"):
-		os.mkdir(f"{args.save_path}/models/")
+		os.makedirs(f"{args.save_path}/models/")
 
 	# File for saving progress
 	log_file=open(f"{args.save_path}/progress_{file_name}.dat", 'w')
@@ -108,13 +164,14 @@ if __name__ == "__main__":
 	torch.manual_seed(args.seed * int(1e6))
 	np.random.seed(args.seed * int(1e6))
 	# Get env info to initilise networks
-	temp_env = gym.make(args.env)
+	temp_env = make_env(args.env, args.max_episode_steps)
 	state_dim = temp_env.observation_space.shape[0]
-	action_dim = temp_env.action_space.shape[0] 
+	action_dim = temp_env.action_space.shape[0]
 	max_action = float(temp_env.action_space.high[0])
+	print(f"Behaviour descriptor: contact proportion of {', '.join(temp_env.foot_geom_names)}")
 	temp_env.close()
 	# Setup functions to launch each paralell evaluation environment
-	make_fns = [partial(make_env, args.env) for _ in range(args.num_cpu)]
+	make_fns = [partial(make_env, args.env, args.max_episode_steps) for _ in range(args.num_cpu)]
 	# Function that creates new actor
 	actor_fn = partial(Actor, 
 				state_dim,
@@ -173,10 +230,15 @@ if __name__ == "__main__":
 	s_archive = {} # init species archive (empty)
 	n_evals = 0 # number of evaluations since the beginning
 	b_evals = 0 # number evaluation since the last dump
+	n_steps = 0 # number of environment steps since the beginning
 	max_fit = -float("inf") # track max fit for extra evaluations to check robustness
+	start_time = time.time()
 
 	# Enter MAP-Elites loop
-	while (n_evals < args.max_evals):
+	while (n_evals < args.max_evals and n_steps < args.max_timesteps):
+		if args.max_hours and time.time() - start_time > args.max_hours * 3600:
+			print(f"Wall-clock limit of {args.max_hours}h reached at [{n_steps}/{args.max_timesteps}] timesteps, stopping early")
+			break
 		print(f"Number of solutions: {len(archive)}")
 		print(f"Number of species: {len(s_archive)}")
 		to_evaluate = []
@@ -205,6 +267,10 @@ if __name__ == "__main__":
 		print(f"[{n_evals}/{int(args.max_evals)}]")
 		# Add to archive
 		for idx, solution in enumerate(solutions):
+			# Solutions evaluated after the step budget ran out are dropped, so the budget is exact to within one episode
+			if n_steps >= args.max_timesteps:
+				break
+			n_steps += solution[3]
 			# Check if alive (or if we ignore if robot died or not)
 			if solution[2] or args.not_discard_dead:
 				# Initate individual
@@ -242,7 +308,7 @@ if __name__ == "__main__":
 				ave_fit = sum([s[0] for s in sol])/10
 				ave_desc = sum([s[1] for s in sol])/10
 
-			log_file.write("{} {} {} {} {} {} {} {} {} {} {}\n".format(n_evals,
+			log_file.write("{} {} {} {} {} {} {} {} {} {} {} {}\n".format(n_evals,
 																len(archive.keys()),
 																fit_list.max(),
 																np.sum(fit_list), #for QD-score
@@ -252,12 +318,16 @@ if __name__ == "__main__":
 																np.percentile(fit_list, 95),
 																ave_fit,
 																str(ave_desc).strip("[]"),
-																max_actor_id))
+																max_actor_id,
+																n_steps))
+			print(f"Timesteps: [{n_steps}/{args.max_timesteps}]")
 			print(f"Max fitness: {fit_list.max()}")
 			print(f"Mean fit: {np.mean(fit_list)}")
 			log_file.flush()
 	# Save the final state of archive
 	save_archive(archive, n_evals, file_name, args.save_path, save_models=True)
+	if args.final_eval_episodes > 0:
+		final_evaluation(archive, args, file_name, start_time)
 	# End paralell processes
 	critic, replay_buffer, env_rng_states = envs.close() 
 	critic.save(f"{args.save_path}/models/{file_name}_critic_" + str(n_evals))

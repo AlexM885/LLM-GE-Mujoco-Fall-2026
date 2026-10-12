@@ -81,6 +81,15 @@ class TrainingConfig:
     brax_batch_size: int = 1024
     brax_num_evals: int = 20
 
+    # Gymnasium TD3-specific (optional, used by the "gymnasium" adapter)
+    # Command prefix for each training process, e.g. "srun --ntasks=1 --cpus-per-task=2"
+    gym_launcher: Optional[str] = None
+    # Directory for the per-training temp files; must be shared if the launcher changes node
+    gym_work_dir: Optional[str] = None
+    # Directory where every trained TD3 model is saved next to its interface code
+    # (run.py defaults it to <run dir>/trained_models)
+    gym_model_dir: Optional[str] = None
+
 
 @dataclass
 class InterfaceConfig:
@@ -144,6 +153,12 @@ class LLMConfig:
     and export the relevant env var, e.g. OPENAI_API_KEY).
     """
 
+    # "openai": any OpenAI-compatible endpoint at api_base.
+    # "llmge": the LLM-GE server (server.py, POST /generate). api_base is then
+    # either a full "http://host:port" or "auto" to read the host from
+    # hostname_file and the port from LLMGE_PORT, as LLM-GE does.
+    provider: str = "openai"
+    hostname_file: Optional[str] = None  # None -> hostname.log at the LLM-GE repository root
     api_base: str = "https://openrouter.ai/api/v1"
     api_key: Optional[str] = None  # None -> read from OPENAI_API_KEY env
     model_name: str = "openai/gpt-4o-mini"
@@ -211,6 +226,12 @@ class Config:
     """Root configuration for LIMEN."""
 
     max_iterations: int = 500
+    # Budget of RL training timesteps for the whole run (0 = no budget, stop at
+    # max_iterations). Only candidates that actually trained are charged.
+    max_total_timesteps: int = 0
+    # Wall-clock limit of this process in hours (0 = none). No new batch is
+    # started when it would not finish in time; resume with --resume.
+    max_wall_time_hours: float = 0.0
     candidates_per_iteration: int = 1
     checkpoint_interval: int = 50
     log_level: str = "INFO"

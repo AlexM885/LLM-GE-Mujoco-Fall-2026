@@ -12,6 +12,7 @@ _ADAPTER_REGISTRY: dict[str, str | type] = {
     "xminigrid": "limen.adapters.xminigrid.XMinigridAdapter",
     "mujoco": "limen.adapters.mujoco.MujocoAdapter",
     "brax": "limen.adapters.brax.BraxAdapter",
+    "gymnasium": "limen.adapters.gym_mujoco.GymMujocoAdapter",
 }
 
 

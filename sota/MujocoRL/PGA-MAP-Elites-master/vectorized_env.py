@@ -2,6 +2,7 @@ import numpy as np
 import cloudpickle
 import pickle
 from multiprocessing import Process, Queue, Event, Pipe
+from queue import Empty
 import copy
 import time
 import torch
@@ -105,35 +106,27 @@ def parallel_worker(process_id,
             # get a new actor to evalaute
             try:
                 idx, actor, evaluation_id, eval_mode = eval_in_queue.get_nowait()
-                env.seed(int((master_seed + 100) * evaluation_id))
-                state = env.reset()
+            except Empty:
+                idx = None
+                time.sleep(0.001)
+            if idx is not None:
+                state = env.reset(seed=int((master_seed + 100) * evaluation_id))
                 done = False
+                transitions = []
                 # eval loop
                 while not done:
-                    action = actor.select_action(np.array(state)) 
-                    next_state, reward, done, _ = env.step(action)
-                    done_bool = float(done) if env.T < env._max_episode_steps else 0
-                    if env.T == 1:
-                        state_array = state
-                        action_array = action
-                        next_state_array = next_state
-                        reward_array = reward
-                        done_bool_array = done_bool
-                    else:
-                        state_array = np.vstack((state, state_array))
-                        action_array = np.vstack((action, action_array))
-                        next_state_array = np.vstack((next_state, next_state_array))
-                        reward_array = np.vstack((reward, reward_array))
-                        done_bool_array = np.vstack((done_bool, done_bool_array))
+                    action = actor.select_action(np.array(state))
+                    next_state, reward, terminated, truncated, _ = env.step(action)
+                    done = terminated or truncated
+                    # only a real termination cuts the return, reaching the time limit does not
+                    transitions.append((state, action, next_state, reward, float(terminated)))
                     state = next_state
                 eval_out_queue.put((idx, (env.tot_reward, env.desc, env.alive, env.T)))
                 if not eval_mode:
-                    trans_out_queue.put((idx, (state_array, action_array, next_state_array, reward_array, done_bool_array)))
-            except:
-                pass
+                    trans_out_queue.put((idx, tuple(np.vstack(x) for x in zip(*transitions))))
             if close_processes.is_set():
                 print(f"Close Eval Process nr. {process_id}")
-                remote.send((process_id, env.np_random.get_state()))
+                remote.send((process_id, env.np_random.bit_generator.state))
                 env.close()
                 time.sleep(10)
                 break

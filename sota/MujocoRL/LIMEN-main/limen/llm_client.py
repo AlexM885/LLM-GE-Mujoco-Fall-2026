@@ -11,12 +11,16 @@ Takes prompt dicts from PromptBuilder, calls the model, extracts code.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import openai
@@ -227,6 +231,83 @@ class LLMClient:
 
 
 # ---------------------------------------------------------------------------
+# LLM-GE server client
+# ---------------------------------------------------------------------------
+
+
+class LLMGEServerClient:
+    """Client for the LLM-GE model server (server.py at the repository root).
+
+    The server takes a raw prompt on POST /generate and returns
+    {"generated_text": ...}. Its host is written to hostname.log by server.sh
+    and its port is LLMGE_PORT, exactly as LLM-GE itself finds it.
+    """
+
+    # The server job is restarted every few hours; wait this long for it to come back
+    _SERVER_WAIT_SECONDS = 3600
+    _POLL_SECONDS = 30
+
+    def __init__(self, config: LLMConfig):
+        self.config = config
+        self._model = config.model_name
+        if config.hostname_file:
+            self._hostname_file = Path(config.hostname_file)
+        else:
+            # limen/ -> LIMEN-main/ -> MujocoRL/ -> sota/ -> repository root
+            self._hostname_file = Path(__file__).resolve().parents[4] / "hostname.log"
+        logger.info("LLMGEServerClient initialized: model=%s url=%s", self._model, self._url())
+
+    def _url(self) -> str:
+        base = self.config.api_base
+        if not base.startswith("http"):
+            host = os.environ.get("SERVER_HOSTNAME", "localhost")
+            if self._hostname_file.exists():
+                host = self._hostname_file.read_text().splitlines()[0].strip() or host
+            base = f"http://{host}:{os.environ.get('LLMGE_PORT', '8169')}"
+        return base.rstrip("/") + "/generate"
+
+    def generate(self, prompt: Dict[str, str]) -> LLMResponse:
+        """Call the server with a prompt dict from PromptBuilder."""
+        system_msg = prompt.get("system", "")
+        text_prompt = f"{system_msg}\n\n{prompt['user']}" if system_msg else prompt["user"]
+        payload: Dict[str, Any] = {
+            "prompt": text_prompt,
+            "max_new_tokens": self.config.max_tokens,
+        }
+        if self.config.temperature is not None:
+            payload["temperature"] = self.config.temperature
+        if self.config.top_p is not None:
+            payload["top_p"] = self.config.top_p
+        body = json.dumps(payload).encode()
+
+        deadline = time.time() + self._SERVER_WAIT_SECONDS
+        while True:
+            # Re-read the host every attempt: it changes when the server job restarts
+            url = self._url()
+            request = urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/json"}
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.config.timeout) as response:
+                    text = json.loads(response.read()).get("generated_text", "")
+                return LLMResponse(
+                    text=text,
+                    code=extract_code(text),
+                    input_tokens=0,
+                    output_tokens=0,
+                    model=self._model,
+                )
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                if time.time() >= deadline:
+                    raise RuntimeError(f"LLM-GE server at {url} not reachable: {e}") from e
+                logger.warning(
+                    "LLM-GE server at %s not reachable (%s), retrying in %ds...",
+                    url, e, self._POLL_SECONDS,
+                )
+                time.sleep(self._POLL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
 # Weighted ensemble
 # ---------------------------------------------------------------------------
 
@@ -246,7 +327,11 @@ class LLMEnsemble:
     def __init__(self, config: LLMConfig):
         self.config = config
 
-        if not config.models:
+        if config.provider == "llmge":
+            self._clients = [LLMGEServerClient(config)]
+            self._weights = [1.0]
+            self._names = [config.model_name]
+        elif not config.models:
             self._clients = [LLMClient(config)]
             self._weights = [1.0]
             self._names = [config.model_name]

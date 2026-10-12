@@ -68,6 +68,32 @@ Each experiment is repeated 20 times with different random seeds and the solid l
 </p>
 
 
+## MuJoCo port (LLM-GE baseline)
+
+This copy no longer uses QDgym/PyBullet. It runs on the same task as `../train_rl.py`:
+
++ Environment: the Gymnasium env built by `../eval.py` (`make_env`, default `Walker2d-v5` with the pinned reward spec), at most 1000 steps per episode.
++ Fitness: undiscounted episode return. Behaviour: proportion of steps each foot is in contact with the ground, read from the MuJoCo contact buffer as in `../eval.py`.
++ Budget: `--max_timesteps` environment steps (default 500000, the `-timesteps` of `train_rl.py`). `Walker2d_config.txt` sets it to 96000000, the budget of one 8-hour LLM-GE job (32 initial genes + 5 generations of 32 = 192 genes x 500000 timesteps), and raises `--max_evals` so that the step budget is what ends the run; replace it with the number of successfully trained genes of the run being compared x 500000.
++ Final evaluation: every solution in the final archive is re-evaluated with `eval.evaluate_model` for `--final_eval_episodes` episodes (default 10) and written to `results_{file_name}.csv` with the columns of the `train_rl.py` results csv, plus `actor_id` and `archive_fitness`.
++ The progress file has the number of environment steps as an extra last column.
+
+On the cluster, submit it from the repository root as one CPU-only job (no LLM server needed):
+
+```shell script
+sbatch sota/MujocoRL/PGA-MAP-Elites-master/slurm/pga_run.sh [SEED] [RUN_DIR]
+```
+
+The job stops the search after `--max_hours` (6.5 of its 8 hours) even if the step budget is not spent, so that the archive, models and final evaluation are always written; there is no resume. Check the last `Timesteps:` line of the job output to see whether the budget was reached.
+
+Or run it directly from the repository root with the evaluation environment:
+
+```shell script
+uv run --project sota/MujocoRL/eval_env python sota/MujocoRL/PGA-MAP-Elites-master/main.py --config_file sota/MujocoRL/PGA-MAP-Elites-master/configure_experiment/Walker2d_config.txt --save_path pga_me_output
+```
+
+`Walker2d_local_config.txt` is a small configuration for testing. The QD*_config.txt and config_*.txt files are the original PyBullet configs and will not run. The rest of this readme describes the original code.
+
 ## How To Run the Code?
 
 ```shell script

@@ -111,6 +111,30 @@ class EvolutionController:
         self.tokens_by_model: dict[str, list[int]] = {}
         self.total_eval_time = 0.0
         self.start_time = 0.0
+        # RL training timesteps spent so far (see config.max_total_timesteps)
+        self.total_train_timesteps = 0
+        # True when run() stopped early because of config.max_wall_time_hours
+        self.stopped_for_wall_time = False
+
+    def _candidate_timesteps(self) -> int:
+        """Training timesteps a candidate costs when it passes every stage."""
+        tc = self.config.training
+        cost = tc.total_timesteps_full * max(tc.num_seeds, 1)
+        if self.config.evaluator.cascade_evaluation:
+            cost += tc.total_timesteps
+        return cost
+
+    def _spent_timesteps(self, result: CandidateResult) -> int:
+        """Training timesteps charged for an evaluated candidate.
+
+        Candidates that crashed or whose training failed are not charged.
+        """
+        if result.metrics is None:
+            return 0
+        if result.stage == EvalStage.FULL_TRAIN:
+            return self._candidate_timesteps()
+        # Only the short cascade run produced metrics
+        return self.config.training.total_timesteps
 
     def _record_tokens(self, response) -> None:
         """Accumulate token usage globally and per-model."""
@@ -156,9 +180,33 @@ class EvolutionController:
         )
 
         executor = ThreadPoolExecutor(max_workers=n)
+        longest_batch = 0.0  # seconds, of the batches run by this process
         try:
             while self.iteration < max_iter:
                 batch_size = min(n, max_iter - self.iteration)
+                budget = self.config.max_total_timesteps
+                if budget:
+                    # Never start more trainings than the budget has left
+                    remaining = (budget - self.total_train_timesteps) // self._candidate_timesteps()
+                    logger.info(
+                        "Training budget: %s / %s timesteps",
+                        f"{self.total_train_timesteps:,}", f"{budget:,}",
+                    )
+                    if remaining <= 0:
+                        logger.info("Training budget reached, ending the run")
+                        break
+                    batch_size = min(batch_size, remaining)
+                wall_limit = self.config.max_wall_time_hours * 3600
+                elapsed = time.time() - self.start_time
+                if wall_limit and elapsed + longest_batch > wall_limit:
+                    # A batch cut off by the job's time limit would be lost
+                    logger.info(
+                        "Not enough wall time left for another batch (%.1fh used), stopping to be resumed",
+                        elapsed / 3600,
+                    )
+                    self.stopped_for_wall_time = True
+                    break
+                batch_start = time.time()
                 try:
                     self._run_batch(executor, batch_size)
                 except KeyboardInterrupt:
@@ -167,6 +215,7 @@ class EvolutionController:
                 except Exception:
                     logger.exception("Error in batch at iteration %d", self.iteration)
                     continue
+                longest_batch = max(longest_batch, time.time() - batch_start)
 
                 # Checkpoint
                 if (
@@ -499,6 +548,7 @@ class EvolutionController:
                 continue
 
             self.total_eval_time += result.eval_time
+            self.total_train_timesteps += self._spent_timesteps(result)
 
             # Store in database
             program = self.db.add(
@@ -621,6 +671,7 @@ class EvolutionController:
         logger.info("  Wall time: %.1fs", elapsed)
         logger.info("  Total programs: %d", stats["total_programs"])
         logger.info("  Total eval time: %.1fs", self.total_eval_time)
+        logger.info("  Training timesteps: %d", self.total_train_timesteps)
         logger.info("  Total LLM tokens: %d", self.total_llm_tokens)
         logger.info("  Input tokens: %d", self.total_input_tokens)
         logger.info("  Output tokens: %d", self.total_output_tokens)
@@ -680,6 +731,7 @@ class EvolutionController:
             "tokens_by_model": self.tokens_by_model,
             "est_llm_cost_usd": round(est_cost, 4),
             "total_eval_time": self.total_eval_time,
+            "total_train_timesteps": self.total_train_timesteps,
             "wall_time": round(elapsed, 1),
             "task_description": self.task_description,
             "evolution_mode": self.config.evolution_mode,
@@ -743,6 +795,7 @@ class EvolutionController:
                 m: list(tok) for m, tok in meta.get("tokens_by_model", {}).items()
             }
             self.total_eval_time = meta.get("total_eval_time", 0.0)
+            self.total_train_timesteps = meta.get("total_train_timesteps", 0)
 
         logger.info(
             "Resumed from checkpoint: iteration=%d, %d programs",

@@ -101,6 +101,9 @@ def parse_args():
     parser.add_argument("--log-level", type=str, default=None, help="Logging level (DEBUG, INFO, WARNING).")
     parser.add_argument("--run-dir", type=str, default=None, help="Explicit run directory (overrides auto-generated).")
     parser.add_argument("--seed", type=int, default=None, help="Random seed override for training and evolution.")
+    parser.add_argument("--launcher", type=str, default=None, help="Command prefix for each training process (gymnasium adapter), e.g. an sbatch --wait line.")
+    parser.add_argument("--work-dir", type=str, default=None, help="Shared directory for per-training temp files (gymnasium adapter).")
+    parser.add_argument("--max-hours", type=float, default=None, help="Wall-clock limit of this process; exits with code 3 when stopped to be resumed.")
 
     return parser.parse_args()
 
@@ -207,6 +210,12 @@ def main():
     if args.seed is not None:
         config.random_seed = args.seed
         config.training.seed = args.seed
+    if args.launcher:
+        config.training.gym_launcher = args.launcher
+    if args.work_dir:
+        config.training.gym_work_dir = args.work_dir
+    if args.max_hours is not None:
+        config.max_wall_time_hours = args.max_hours
 
     # Resolve task: CLI arg overrides config
     task_description = args.task  # may be None; controller falls back to config
@@ -220,6 +229,10 @@ def main():
         checkpoint_dir = f"runs/{env_short}{mode_suffix}_{timestamp}"
 
     run_dir = checkpoint_dir or args.resume
+
+    # Keep everything a run produces inside its own directory
+    if config.environment.adapter_type == "gymnasium" and not config.training.gym_model_dir:
+        config.training.gym_model_dir = str(Path(run_dir).resolve() / "trained_models")
 
     # Setup logging (file + clean console)
     log_file = setup_logging(config.log_level, run_dir)
@@ -250,6 +263,8 @@ def main():
     else:
         print(f"  Model:       {config.llm.model_name} ({config.llm.api_base})")
     print(f"  Iterations:  {config.max_iterations}")
+    if config.max_total_timesteps:
+        print(f"  Budget:      {config.max_total_timesteps:,} training timesteps")
     print(f"  Candidates:  {config.candidates_per_iteration} per batch")
     print(f"  Training:    {config.training.total_timesteps:,} short / {config.training.total_timesteps_full:,} full steps")
     print(f"  Cascade:     {'ON' if config.evaluator.cascade_evaluation else 'OFF'} (thresholds={config.evaluator.cascade_thresholds})")
@@ -298,6 +313,10 @@ def main():
     print(f"  Full logs:     {log_file}")
     print(f"  Checkpoint:    {run_dir}")
     print(f"{'=' * 60}")
+
+    if controller.stopped_for_wall_time:
+        # Tells the job script to resubmit with --resume
+        sys.exit(3)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,8 @@ from joblib import Parallel, delayed
 
 import time
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Actors are created, varied and sent between processes on the CPU, so everything stays on the CPU
+device = torch.device("cpu")
 
 
 

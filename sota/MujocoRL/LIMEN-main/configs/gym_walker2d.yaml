@@ -1,0 +1,94 @@
+# LIMEN on the LLM-GE problem (sota/MujocoRL/train_rl.py):
+# Walker2d-v5, SB3 TD3 with the seed network.py, 500k steps per candidate,
+# fitness from eval.py, and the same total budget of training timesteps.
+
+# The run ends when max_total_timesteps is spent; max_iterations only bounds
+# the number of LLM candidates in case nothing ever trains.
+max_iterations: 5000
+max_total_timesteps: 96000000      # = 192 candidates x 500k (MUJOCO_TOTAL_TIMESTEPS)
+candidates_per_iteration: 32       # trained in parallel (LLM-GE population_size)
+checkpoint_interval: 1
+log_level: "INFO"
+random_seed: 42
+
+environment:
+  env_id: "Walker2d-v5"
+  adapter_type: "gymnasium"
+  context_file: "contexts/gym_walker2d.md"
+
+training:
+  total_timesteps: 500000          # unused (no cascade)
+  total_timesteps_full: 500000     # MUJOCO_EVAL_TIMESTEPS
+  num_seeds: 1                     # one training per candidate, as in LLM-GE
+
+  # Evaluation (MUJOCO_EVAL_EPISODES / MUJOCO_EVAL_MAX_STEPS)
+  eval_episodes_for_fitness: 10
+  eval_max_steps: 1000
+  seed: 42
+
+  # Each training is its own process. slurm/limen_run.sh sets these two so that
+  # every training is its own SLURM job (--launcher "sbatch --wait ...",
+  # --work-dir on the shared filesystem). With null they run on this machine.
+  gym_launcher: null
+  gym_work_dir: null
+
+interface:
+  max_obs_dim: 512
+
+crash_filter:
+  stage0_timeout: 5
+  stage1_timeout: 10
+  stage2_timeout: 60
+  retry_on_crash: true
+  max_crash_retries: 1
+
+evaluator:
+  timeout: 108000                  # 30h per training, queue wait included (CUF_TIMEOUT)
+  max_retries: 2
+  cascade_evaluation: false
+
+llm:
+  # The LLM-GE model server (sbatch server.sh): host from hostname.log, port
+  # from LLMGE_PORT. For an OpenAI-compatible endpoint instead, set
+  # provider: "openai", api_base to its URL and OPENAI_API_KEY.
+  provider: "llmge"
+  api_base: "auto"
+  model_name: "meta-llama/Llama-3.3-70B-Instruct"
+  temperature: 0.7
+  max_tokens: 4096
+  retries: 3
+  retry_delay: 1.0
+
+database:
+  population_size: 200
+  archive_size: 50
+  num_islands: 3
+  feature_dimensions: ["reward_complexity", "obs_dimensionality"]
+  feature_bins: 5
+  migration_interval: 20
+  migration_rate: 0.1
+  exploitation_ratio: 0.7
+  exploration_ratio: 0.2
+
+prompt:
+  num_top_programs: 3
+  num_diverse_programs: 2
+  num_failure_examples: 2
+  include_artifacts: true
+  max_artifact_bytes: 20480
+
+evolution_trace:
+  enabled: true
+  include_code: true
+  include_prompts: true
+  buffer_size: 1
+
+task_description: >
+  Make the Walker2d robot walk forward (+x direction) as fast as possible
+  without falling. Fitness is the environment's own episode return:
+  forward velocity (1.0 * dx/dt) plus 1.0 for every step the robot stays
+  healthy (torso height in (0.8, 2.0) and torso angle in (-1, 1)) minus
+  0.001 * sum(action^2), summed over an episode of at most 1000 steps.
+  The robot has two legs with 3 joints each (6 actuators total). The agent
+  is trained with TD3 on your reward and observation, and ranked by the
+  fitness above.

@@ -39,6 +39,22 @@ MAP_BINS = globals().get("MAP_BINS", 20)
 MAP_ELITES_DESCRIPTORS = globals().get("MAP_ELITES_DESCRIPTORS", [])
 MAP_ELITES_OBJECTIVE = globals().get("MAP_ELITES_OBJECTIVE", "mean_reward")
 FAILED_EVAL_SENTINEL = globals().get("FAILED_EVAL_SENTINEL", -999999.0)
+# Budget of successfully trained genes for the whole run; 0 disables it.
+MAX_SUCCESSFUL_EVALS = globals().get("MAX_SUCCESSFUL_EVALS", 0)
+
+def count_successful_evals(*stores):
+    """Number of distinct genes whose training run finished with a real result.
+
+    Genes that failed to build, train or evaluate (FAILED_EVAL_SENTINEL, or no
+    results at all) used no meaningful share of the budget and are not counted.
+    """
+    successful = set()
+    for store in stores:
+        for gene_id, entry in store.items():
+            metrics = entry.get('metrics')
+            if metrics and metrics.get(MAP_ELITES_OBJECTIVE, FAILED_EVAL_SENTINEL) > FAILED_EVAL_SENTINEL:
+                successful.add(gene_id)
+    return len(successful)
 
 def print_ancestry(data):
     for gene in data.keys():
@@ -1197,6 +1213,13 @@ if __name__ == "__main__":
     # Evolution
     for gen in range(start_gen, num_generations if migration_gen == 0 else ((start_gen + migration_gen - 1) // migration_gen) * migration_gen + 1):
         GEN_COUNT = gen
+        if MAX_SUCCESSFUL_EVALS:
+            successful_evals = count_successful_evals(GLOBAL_DATA, GLOBAL_DATA_HIST)
+            remaining_evals = MAX_SUCCESSFUL_EVALS - successful_evals
+            box_print(f"SUCCESSFUL EVALS: {successful_evals}/{MAX_SUCCESSFUL_EVALS}", new_line_end=False)
+            if remaining_evals <= 0:
+                print("Evaluation budget reached, ending the run")
+                break
         if USE_MAP_ELITES:
             # The archive, not the last batch of offspring, is the live population.
             archived = list(MAP_ELITES_ARCHIVE.values())
@@ -1261,7 +1284,11 @@ if __name__ == "__main__":
             else:
                 print(f"Selecting {population_size} offspring")
                 offspring = toolbox.select(population, population_size)
-        
+
+        if MAX_SUCCESSFUL_EVALS:
+            # Never train more genes than the budget has left, so it cannot be overshot.
+            offspring = offspring[:remaining_evals]
+
         print_population(offspring, GLOBAL_DATA)
         
         print([len(GLOBAL_DATA_HIST), len(GLOBAL_DATA), len(population), len(offspring)])

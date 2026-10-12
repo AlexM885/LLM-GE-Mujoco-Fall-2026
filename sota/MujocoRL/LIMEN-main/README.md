@@ -29,6 +29,34 @@ Manually designing observations and rewards is the bottleneck for applying RL to
 
 The framework is environment-agnostic. Use it for any task where you have a simulator and a binary success metric.
 
+## LLM-GE baseline: Walker2d-v5 with TD3
+
+This copy has an extra `gymnasium` adapter that runs LIMEN on the same problem and budget as LLM-GE (`../train_rl.py`):
+
+- **Environment**: Gymnasium `Walker2d-v5` built by `../eval.py` (`make_env`, pinned reward spec).
+- **Learner**: Stable-Baselines3 TD3 with the seed `../network.py` (policy and TD3 kwargs), 500,000 steps per candidate, one seed.
+- **Fitness**: `eval.evaluate_model`, the mean return of the environment's own reward over 10 episodes of at most 1000 steps. The evolved reward is only the training signal. The foot contacts and the other columns of the `train_rl.py` results are stored in each program's metrics.
+- **Budget**: `max_total_timesteps: 96000000` (192 trainings, one 8-hour LLM-GE job: 32 initial genes + 5 generations of 32). Only candidates that trained are charged; crashed candidates and failed trainings are not. The run stops when the budget is spent.
+- **Batches**: 32 candidates per iteration, each trained in its own process.
+- **LLM**: `llm.provider: "llmge"` uses the LLM-GE model server (`server.py`), found through `hostname.log` and `LLMGE_PORT` like LLM-GE does. `provider: "openai"` uses any OpenAI-compatible endpoint (`llm.api_base`, `OPENAI_API_KEY`).
+
+Run it on the cluster from the repository root, with the LLM server running (`sbatch server.sh`):
+
+```bash
+sbatch sota/MujocoRL/LIMEN-main/slurm/limen_run.sh [RUN_DIR]
+```
+
+`slurm/limen_run.sh` is the controller job (the counterpart of `run.sh`). It submits every training as its own job (`slurm/train_job.sh`, same resources as an LLM-GE evaluation job), stops before its time limit and resubmits itself with `--resume` until the budget is spent. Everything the run writes is under `RUN_DIR` (default `baseline_runs/limen/walker2d`): the archive, `best_interface.py`, `trained_models/` (one TD3 model and its interface code per candidate) and `job_logs/`. Pass a new `RUN_DIR` to start a separate run.
+
+Without SLURM, the trainings of a batch run as local processes:
+
+```bash
+uv run --project sota/MujocoRL/LIMEN-main python sota/MujocoRL/LIMEN-main/run.py \
+    --config sota/MujocoRL/LIMEN-main/configs/gym_walker2d.yaml
+```
+
+`configs/gym_walker2d_local.yaml` is a tiny version for testing. The original tasks below need `uv pip install -e ".[original]"`.
+
 ## Table of Contents
 
 - [Features](#features)

@@ -459,9 +459,10 @@ class PromptBuilder:
 
         if fitness_type == "reward":
             reward_philosophy = (
-                "- The reward should provide a learning signal that maximizes the agent's "
-                "cumulative episode return. The agent IS evaluated on total reward.\n"
-                "- Higher episode return = better performance. Design reward components "
+                "- The reward should provide a learning signal that maximizes the task "
+                "fitness described in the task. The agent is evaluated on that fitness, "
+                "NOT on the magnitude of your reward.\n"
+                "- Higher fitness = better performance. Design reward components "
                 "that encourage the desired behavior.\n"
                 "- The reward can use any structure — dense shaping, velocity bonuses, "
                 "energy penalties, or combinations. Use what fits the task."
@@ -517,9 +518,10 @@ class PromptBuilder:
             return (
                 "**Reward design:**\n"
                 "- Design a reward signal that will help the agent learn the task. "
-                "The agent is evaluated by the cumulative episode return (total reward).\n"
-                "- Higher episode return = better performance. The reward IS the fitness metric.\n"
-                "- Consider what sub-objectives help the agent maximize long-term return.\n"
+                "The agent is evaluated by the task fitness described in the task, "
+                "not by the magnitude of your reward.\n"
+                "- Higher fitness = better performance.\n"
+                "- Consider what sub-objectives help the agent maximize the task fitness.\n"
                 "- AVOID reward hacking: do not reward proxies that can be maximized "
                 "without actually completing the task.\n\n"
             )
@@ -537,19 +539,19 @@ class PromptBuilder:
         """Return top-level function instructions based on mode."""
         if self.evolution_mode == "reward_only":
             return (
-                "Design a `compute_reward` function that will help a PPO "
+                "Design a `compute_reward` function that will help an RL "
                 "agent learn the task described above.\n"
                 "The observation is handled by the system — you only need to design the reward."
             )
         elif self.evolution_mode == "obs_only":
             return (
-                "Design a `get_observation` function that will give a PPO agent "
+                "Design a `get_observation` function that will give an RL agent "
                 "the information it needs to learn the task described above.\n"
                 "The reward uses the environment's built-in signal — you only need to design the observation."
             )
         else:
             return (
-                "Design `get_observation` and `compute_reward` functions that will allow a PPO "
+                "Design `get_observation` and `compute_reward` functions that will allow an RL "
                 "agent to learn the task described above."
             )
 
