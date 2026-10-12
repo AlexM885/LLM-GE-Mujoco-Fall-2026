@@ -9,6 +9,14 @@ the per-gene result JSON; if a process dies without writing one, a
 A gene whose result JSON already exists is *not* re-run. This is what makes
 a resumed run skip evaluations that completed before an interruption.
 
+``SlurmEvaluator`` submits one Slurm job per gene instead (``sbatch --wait``),
+several at a time; used for XQC, which needs a GPU per gene. The job script
+(``scripts/mesb/xqc_gene.sbatch``) runs the same per-gene trainer, so the
+result JSON is identical to a local run.
+
+The trainer depends on the learner (``algo``): ``train_gene.py`` (PPO, SB3)
+or ``train_gene_xqc.py`` (XQC, Shazeb's trainer on shazeb/halfcheetah-xqc).
+
 ``MockEvaluator`` produces synthetic results without MuJoCo or PPO. It is for
 tests of the evolution/archive plumbing only and has no scientific meaning.
 """
@@ -32,6 +40,7 @@ from sota.MujocoRL.results_io import (SCHEMA_VERSION, EvaluationOutcome, atomic_
                                       failure_payload, read_outcome)
 
 TRAIN_SCRIPT = Path(__file__).resolve().parent / "train_gene.py"
+XQC_TRAIN_SCRIPT = Path(__file__).resolve().parent / "train_gene_xqc.py"
 
 
 @dataclass(frozen=True)
@@ -56,6 +65,15 @@ class EvalSettings:
     timeout_sec: float = 6 * 3600
     workers: int = 1
     python_cmd: str = sys.executable
+    #: Learner: "ppo" (train_gene.py) or "xqc" (train_gene_xqc.py).
+    algo: str = "ppo"
+    #: XQC: seeds trained together per gene, and the XQC seed (Shazeb's island
+    #: uses 0 for every gene, so every gene sees the same evaluation rollouts).
+    num_seeds: int = 1
+    xqc_seed: int = 0
+    #: Slurm evaluator: job script and extra sbatch flags (e.g. "-A coc").
+    slurm_script: str | None = None
+    slurm_flags: str = ""
 
 
 class _BaseEvaluator:
@@ -83,20 +101,45 @@ class _BaseEvaluator:
         return {j.gene_id: read_outcome(j.out_json, j.gene_id) for j in jobs}
 
 
+def trainer_args(settings: EvalSettings, job: EvalJob) -> list[str]:
+    """Script + arguments of the per-gene trainer (without the Python command)."""
+    s = settings
+    if s.algo == "xqc":
+        return [
+            str(XQC_TRAIN_SCRIPT),
+            "--gene-file", str(job.gene_file), "--gene-id", job.gene_id,
+            "--out-json", str(job.out_json), "--run-dir", str(job.model_dir / job.gene_id),
+            "--generation", str(job.generation), "--env", s.env_id,
+            "--seed", str(s.xqc_seed), "--timesteps", str(s.timesteps),
+            "--num-seeds", str(s.num_seeds), "--eval-episodes", str(s.episodes),
+            "--max-steps", str(s.max_steps),
+        ]
+    if s.algo != "ppo":
+        raise ValueError(f"unknown algo {s.algo!r}")
+    return [
+        str(TRAIN_SCRIPT),
+        "--gene-file", str(job.gene_file), "--gene-id", job.gene_id,
+        "--out-json", str(job.out_json), "--model-dir", str(job.model_dir),
+        "--generation", str(job.generation), "--env", s.env_id,
+        "--seed", str(job.train_seed), "--eval-seed", str(s.eval_seed),
+        "--timesteps", str(s.timesteps), "--eval-episodes", str(s.episodes),
+        "--eval-max-steps", str(s.max_steps), "--device", s.device,
+    ]
+
+
+def _write_failure(job: EvalJob, reason: str, stage: str) -> None:
+    atomic_write_json(job.out_json, failure_payload(
+        job.gene_id, reason, generation=job.generation, seed=job.train_seed,
+        stage=stage, log_file=str(job.log_file), log_tail=_tail(job.log_file)))
+    print(f"\t✗ evaluation of {job.gene_id} (generation {job.generation}) failed: {reason}",
+          flush=True)
+
+
 class SubprocessEvaluator(_BaseEvaluator):
-    """Run ``train_gene.py`` per gene in a separate Python process."""
+    """Run the per-gene trainer in a separate Python process."""
 
     def command(self, job: EvalJob) -> list[str]:
-        s = self.settings
-        return shlex.split(s.python_cmd) + [
-            str(TRAIN_SCRIPT),
-            "--gene-file", str(job.gene_file), "--gene-id", job.gene_id,
-            "--out-json", str(job.out_json), "--model-dir", str(job.model_dir),
-            "--generation", str(job.generation), "--env", s.env_id,
-            "--seed", str(job.train_seed), "--eval-seed", str(s.eval_seed),
-            "--timesteps", str(s.timesteps), "--eval-episodes", str(s.episodes),
-            "--eval-max-steps", str(s.max_steps), "--device", s.device,
-        ]
+        return shlex.split(self.settings.python_cmd) + trainer_args(self.settings, job)
 
     def _run_one(self, job: EvalJob) -> None:
         job.log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -117,12 +160,60 @@ class SubprocessEvaluator(_BaseEvaluator):
             except OSError as exc:
                 reason = f"could not start evaluation process: {exc}"
         if reason is not None:
-            tail = _tail(job.log_file)
-            atomic_write_json(job.out_json, failure_payload(
-                job.gene_id, reason, generation=job.generation, seed=job.train_seed,
-                stage="subprocess", log_file=str(job.log_file), log_tail=tail))
-            print(f"\t✗ evaluation of {job.gene_id} (generation {job.generation}) failed: {reason}",
-                  flush=True)
+            _write_failure(job, reason, "subprocess")
+
+
+class SlurmEvaluator(_BaseEvaluator):
+    """One Slurm job per gene (``sbatch --wait``), ``workers`` jobs at a time.
+
+    The job script receives the trainer arguments; Slurm writes the job's
+    output to the gene's log file. ``timeout_sec`` covers queueing and
+    running; on timeout the job is cancelled and the gene counts as failed.
+    """
+
+    def command(self, job: EvalJob) -> list[str]:
+        s = self.settings
+        if not s.slurm_script:
+            raise ValueError(f"no Slurm job script for algo {s.algo!r}")
+        args = trainer_args(s, job)[1:]  # the job script calls the trainer itself
+        return (["sbatch", "--wait", "--parsable", "--job-name", f"mesb-{job.gene_id[:12]}",
+                 "--output", str(job.log_file)] + shlex.split(s.slurm_flags)
+                + [str(s.slurm_script)] + args)
+
+    def _run_one(self, job: EvalJob) -> None:
+        job.log_file.parent.mkdir(parents=True, exist_ok=True)
+        cmd = self.command(job)
+        reason, job_id = None, None
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                out, err = proc.communicate(timeout=self.settings.timeout_sec)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+                job_id = _first_job_id(out)
+                if job_id:
+                    subprocess.run(["scancel", job_id], check=False)
+                reason = f"Slurm job {job_id or '?'} timed out after {self.settings.timeout_sec:.0f}s"
+                if job.out_json.exists():
+                    job.out_json.unlink()
+            else:
+                job_id = _first_job_id(out)
+                if not job.out_json.exists():
+                    reason = (f"Slurm job {job_id or '?'} ended (sbatch exit {proc.returncode}) "
+                              f"without a result file{': ' + err.strip()[-300:] if err.strip() else ''}")
+        except OSError as exc:
+            reason = f"could not run sbatch: {exc}"
+        if reason is not None:
+            _write_failure(job, reason, "slurm")
+
+
+def _first_job_id(text: str | None) -> str | None:
+    for line in (text or "").splitlines():
+        token = line.strip().split(";")[0]
+        if token.isdigit():
+            return token
+    return None
 
 
 def _tail(path: Path, n: int = 20) -> str:
@@ -176,6 +267,8 @@ class MockEvaluator(_BaseEvaluator):
 def make_evaluator(kind: str, settings: EvalSettings) -> _BaseEvaluator:
     if kind == "subprocess":
         return SubprocessEvaluator(settings)
+    if kind == "slurm":
+        return SlurmEvaluator(settings)
     if kind == "mock":
         return MockEvaluator(settings)
     raise ValueError(f"unknown evaluator {kind!r}")

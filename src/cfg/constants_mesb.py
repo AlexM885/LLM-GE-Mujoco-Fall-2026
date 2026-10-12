@@ -24,6 +24,41 @@ CONSTANT_RULES_PATH = "templates/Mujoco/ConstantRules.txt"
 #: Centralised output location (same name as OUTPUT_DIR in constants_Mujoco.py).
 OUTPUT_ROOT = "mujoco_rl_output"
 
+# --- Learner ("algo") profiles -------------------------------------------------
+#: ``--algo`` picks the learner each gene is trained with. Everything that
+#: differs between learners lives here; the archive, selection and logging
+#: are shared. The "xqc" profile uses Shazeb's XQC island from
+#: shazeb/halfcheetah-xqc unchanged: its seed gene, prompts, rules and its
+#: gene validator (sota/XQC/train_xqc_gene.py).
+ALGO = "ppo"
+ALGO_PROFILES = {
+    "ppo": {
+        "seed_network": SEED_NETWORK,
+        "prompt_glob": MUTATION_PROMPT_GLOB,
+        "constant_rules": CONSTANT_RULES_PATH,
+        "required_functions": ("get_policy_kwargs", "get_ppo_kwargs"),
+        "train_script": TRAIN_SCRIPT,
+        "eval_timesteps": 500_000,
+        "eval_num_seeds": 1,
+        "slurm_script": None,
+    },
+    "xqc": {
+        "seed_network": ROOT_DIR / "sota" / "XQC" / "llmge" / "network.py",
+        "prompt_glob": "templates/Mujoco/XQC/*.txt",
+        "constant_rules": "templates/Mujoco/XQC_ConstantRules.txt",
+        "required_functions": ("get_architecture_kwargs", "get_xqc_kwargs"),
+        "train_script": SOTA_ROOT / "train_gene_xqc.py",
+        #: Shazeb's island budget: 100k env steps x 3 seeds trained together.
+        "eval_timesteps": 100_000,
+        "eval_num_seeds": 3,
+        #: One GPU job per gene (sbatch --wait); see scripts/mesb/xqc_gene.sbatch.
+        "slurm_script": ROOT_DIR / "scripts" / "mesb" / "xqc_gene.sbatch",
+    },
+}
+#: Shazeb's gene validator (stdlib only): checks keys and ranges of an XQC gene.
+XQC_GENE_VALIDATOR = ROOT_DIR / "sota" / "XQC" / "train_xqc_gene.py"
+XQC_TRAIN_SCRIPT = ROOT_DIR / "sota" / "XQC" / "train_xqc.py"
+
 # --- Environment / evaluation ------------------------------------------------
 ENV_ID = "HalfCheetah-v4"
 EVAL_TIMESTEPS = 500_000

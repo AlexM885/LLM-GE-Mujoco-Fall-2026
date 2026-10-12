@@ -29,7 +29,16 @@ Two jobs:
     contain no bare-name statements (``ERROR``, ``modified_code`` ...) that
     would crash at import. Duplicate top-level definitions (the LLM rewrote
     the whole module inside one chunk; Python keeps the last one) are
-    reported but allowed.
+    reported but allowed. The required function names depend on the
+    learner (``--algo``): PPO genes need ``get_policy_kwargs`` /
+    ``get_ppo_kwargs``, XQC genes ``get_architecture_kwargs`` /
+    ``get_xqc_kwargs``.
+
+``validate_xqc_gene(path, validator)``
+    For XQC genes, additionally runs Shazeb's own gene check
+    (``gene_overrides`` in ``sota/XQC/train_xqc_gene.py``: ALGO header, allowed
+    keys, types and ranges), so a child the trainer would reject is caught
+    before a GPU job is spent on it.
 """
 
 from __future__ import annotations
@@ -101,7 +110,8 @@ def extract_code(reply) -> str:
     return FAILURE_TOKEN
 
 
-def validate_child(path: str | Path) -> tuple[bool, str, dict]:
+def validate_child(path: str | Path, required_functions: tuple[str, ...] = REQUIRED_FUNCTIONS
+                   ) -> tuple[bool, str, dict]:
     """Return (ok, reason, info) for a generated network file."""
     path = Path(path)
     if not path.exists():
@@ -113,7 +123,7 @@ def validate_child(path: str | Path) -> tuple[bool, str, dict]:
         return False, f"SyntaxError line {exc.lineno}: {exc.msg}", {}
     top = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))]
     names = Counter(n.name for n in top)
-    missing = [f for f in REQUIRED_FUNCTIONS if f not in names]
+    missing = [f for f in required_functions if f not in names]
     if missing:
         return False, f"missing required function(s) {missing}", {}
     for node in tree.body:
@@ -122,3 +132,23 @@ def validate_child(path: str | Path) -> tuple[bool, str, dict]:
                            f"({ast.get_source_segment(source, node)!r}) would fail at import"), {}
     duplicates = sorted(n for n, c in names.items() if c > 1)
     return True, "ok", {"duplicate_definitions": duplicates}
+
+
+def validate_xqc_gene(path: str | Path, validator: str | Path) -> tuple[bool, str]:
+    """Run ``gene_overrides`` from Shazeb's XQC trainer on a child gene.
+
+    The validator module only needs the standard library, so this works in
+    the driver's environment. Returns (ok, reason).
+    """
+    import importlib.util
+    try:
+        spec = importlib.util.spec_from_file_location("mesb_xqc_gene_validator", str(validator))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - report, never crash the operator
+        return False, f"could not load XQC gene validator {validator}: {exc!r}"
+    try:
+        module.gene_overrides(str(path))
+    except Exception as exc:  # noqa: BLE001 - any error means the trainer would reject it
+        return False, f"XQC gene check failed: {exc}"
+    return True, "ok"

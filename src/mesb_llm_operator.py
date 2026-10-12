@@ -36,6 +36,11 @@ Backends
     LLM output back to the chunk that was shown to the LLM (the original is
     off by one; see ``llm_crossover`` below and docs/MESB.md).
 
+``--algo`` (ppo | xqc) says which learner the gene is for: it decides which
+functions a child must define, and for XQC also runs Shazeb's gene check
+(``sota/XQC/train_xqc_gene.py``). The driver sets ``LLMGE_ALGO`` to match, so
+the team's operators load the right constants.
+
 ``mock``
     Deterministic, LLM-free edits of the seed-network hyper-parameters. For
     pipeline smoke tests and CI only; it has no scientific meaning.
@@ -66,7 +71,8 @@ SPLIT_MARKER = "# --OPTION--"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from mesb_llm_guard import extract_code, validate_child  # noqa: E402
+import cfg.constants_mesb as CM  # noqa: E402
+from mesb_llm_guard import extract_code, validate_child, validate_xqc_gene  # noqa: E402
 
 #: Exit code for "LLM answered, but the child network is unusable".
 EXIT_INVALID_CHILD = 3
@@ -205,6 +211,8 @@ def llm_crossover(args: argparse.Namespace) -> None:
 # ------------------------------------------------------------------ mock backend
 _LIST_RE = re.compile(r"^(HIDDEN_(?:PI|VF)\s*=\s*)\[([^\]]*)\]", re.M)
 _LR_RE = re.compile(r"(learning_rate\s*=\s*)([0-9.eE+-]+)")
+_XQC_DIMS_RE = re.compile(r"(hidden_dims_(?:critic|actor)\s*=\s*)\[([^\]]*)\]")
+_XQC_LR_RE = re.compile(r"((?:actor|critic|temp)_lr\s*=\s*)([0-9.eE+-]+)")
 
 
 def mock_mutate_text(code: str, rng: random.Random) -> str:
@@ -222,13 +230,29 @@ def mock_mutate_text(code: str, rng: random.Random) -> str:
     return _LR_RE.sub(lr, _LIST_RE.sub(widths, code))
 
 
+def mock_mutate_xqc_text(code: str, rng: random.Random) -> str:
+    """XQC counterpart: rescale hidden widths / learning rates within the
+    ranges sota/XQC/train_xqc_gene.py accepts."""
+    def widths(match: re.Match) -> str:
+        sizes = [int(s) for s in match.group(2).split(",") if s.strip()]
+        sizes = [min(4096, max(8, int(s * rng.choice([0.5, 1.0, 2.0])))) for s in sizes]
+        return f"{match.group(1)}[{', '.join(str(s) for s in sizes)}]"
+
+    def lr(match: re.Match) -> str:
+        value = min(1e-2, max(1e-6, float(match.group(2)) * rng.choice([0.5, 1.0, 2.0])))
+        return f"{match.group(1)}{value:.2e}"
+
+    return _XQC_LR_RE.sub(lr, _XQC_DIMS_RE.sub(widths, code))
+
+
 def mock_mutate(args: argparse.Namespace) -> None:
     rng = random.Random(args.seed)
     code = Path(args.input).read_text(encoding="utf-8")
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    child = mock_mutate_text(code, rng)
+    child = (mock_mutate_xqc_text if args.algo == "xqc" else mock_mutate_text)(code, rng)
     if "MOCK_INVALID_CHILD" in code:  # test hook: imitate an LLM placeholder reply
-        child = child.replace("def get_ppo_kwargs", "ERROR\ndef _gone")
+        for name in ("def get_ppo_kwargs", "def get_xqc_kwargs"):
+            child = child.replace(name, "ERROR\ndef _gone")
     Path(args.output).write_text(child, encoding="utf-8")
     print("Job Done")
 
@@ -251,6 +275,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="MESB wrapper around the LLM variation operators")
     p.add_argument("operator", choices=["mutate", "crossover"])
     p.add_argument("--backend", choices=["llm", "mock"], default="llm")
+    p.add_argument("--algo", choices=sorted(CM.ALGO_PROFILES), default=CM.ALGO,
+                   help="Learner the gene is for; decides which functions a child must define")
     p.add_argument("--input", required=True, help="Parent network file (x)")
     p.add_argument("--input-y", help="Second parent (crossover only)")
     p.add_argument("--output", required=True, help="Child network file to write")
@@ -289,7 +315,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.no_validate:
         return 0
-    ok, reason, info = validate_child(out)
+    profile = CM.ALGO_PROFILES[args.algo]
+    ok, reason, info = validate_child(out, profile["required_functions"])
+    if ok and args.algo == "xqc":
+        ok, reason = validate_xqc_gene(out, CM.XQC_GENE_VALIDATOR)
     if not ok:
         rejected = out.with_name(out.stem + ".rejected.py")
         out.replace(rejected)

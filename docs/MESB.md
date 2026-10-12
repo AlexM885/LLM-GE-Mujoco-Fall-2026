@@ -10,6 +10,11 @@ MAP-Elites), the same starting point as `shazeb/halfcheetah-xqc`. It is
 **purely additive**: no existing file was modified. The MESB driver is
 `run_mesb.py`; `run_improved.py` (NSGA-II / fixed-grid MAP-Elites) is untouched.
 
+Branch `aayush/mesb-xqc` is the same MESB code on top of
+`shazeb/halfcheetah-xqc`, with one addition: `--algo xqc` trains every gene
+with Shazeb's XQC island instead of PPO (section 21). It changes none of his
+files.
+
 - [1. Problem](#1-problem)
 - [2. Fixed-grid limitation](#2-standard-map-elites-fixed-grid-limitation)
 - [3. Sliding Boundaries](#3-fontaine-et-al-2019-sliding-boundaries)
@@ -21,6 +26,7 @@ MAP-Elites), the same starting point as `shazeb/halfcheetah-xqc`. It is
 - [17–18. Visualisation and video](#17-visualisation)
 - [19. Fixed-grid comparison](#19-fixed-grid-comparison)
 - [20. Known limitations](#20-known-limitations)
+- [21. XQC learner (`--algo xqc`)](#21-xqc-learner---algo-xqc)
 - [Appendix: files, bugs found, tests](#appendix-a-files)
 
 ---
@@ -549,6 +555,74 @@ needed at all is the point of MESB.
 - With finite ξ, elites evicted from the buffer vanish at the next remap
   (paper behaviour).
 
+## 21. XQC learner (`--algo xqc`)
+
+`--algo xqc` swaps the learner and nothing else: archive, selection, LLM
+operators, checkpoints and analysis are the same as for PPO. It uses Shazeb's
+XQC island from `shazeb/halfcheetah-xqc` (`LLMGE_ALGO=xqc` in his
+`run_improved.py` setup) as it is:
+
+| part | XQC profile (`ALGO_PROFILES["xqc"]` in `src/cfg/constants_mesb.py`) |
+|---|---|
+| starting gene | `sota/XQC/llmge/network.py` (paper settings: critic 4×512, actor 4×256, batch + weight norm) |
+| LLM prompts / rules | `templates/Mujoco/XQC/*.txt`, `templates/Mujoco/XQC_ConstantRules.txt` |
+| child check | `get_architecture_kwargs` and `get_xqc_kwargs` must exist, then his `gene_overrides()` (keys, types, ranges, `n_critics = 2`) runs before any GPU time is spent |
+| team operators | run with `LLMGE_ALGO=xqc`, so `constants_Mujoco.py` gives them his seed gene and `FORBIDDEN_PATTERNS` |
+| training | `sota/MujocoRL/train_gene_xqc.py` calls his `sota/XQC/train_xqc.py` with exactly the arguments his `train_xqc_gene.py` uses: 100k steps × 3 seeds trained together, XQC seed 0 for every gene, `final_descriptors=true` |
+| budget | 100k steps × 3 seeds per gene; one GPU job per gene (`scripts/mesb/xqc_gene.sbatch`: ice-gpu, NVIDIA, 1.5 h, his job settings) |
+
+`mean_reward` and `std_reward` are his (mean / std of the per-seed 10-episode
+means), so a gene needs to be good across 3 training seeds, not lucky on one.
+Every episode's return, distance and control cost is kept in the result JSON.
+Control cost is stored as the per-episode total, like the PPO runs; his
+per-step value is `mean_control_cost_per_step` (total = per-step × 1000 on
+HalfCheetah). Sliding boundaries are rank based, so the archive is the same in
+either unit; for a fixed grid matching his `MAP_ELITES_DESCRIPTORS` use
+`--fixed-ranges -500 2000 0 600`.
+
+**One-time setup on PACE** (the XQC Python 3.9 + JAX environment, in your
+scratch space, `~/scratch/xqc-baseline` by default):
+
+```bash
+cd <your clone> && git fetch && git switch aayush/mesb-xqc
+XQC_REPO=$PWD bash sota/XQC/pace/install_env.sh
+git checkout -- sota/XQC/requirements.lock.txt   # the installer rewrites this tracked file
+```
+
+**Smoke test** (2 generations of 8 genes, 20k steps, 1 seed; about an hour):
+
+```bash
+scripts/mesb/start_llm_server.sh 1
+ALGO=xqc NUM_GENERATIONS=1 TIMESTEPS=20000 NUM_SEEDS=1 GPU_JOBS=8 \
+  EXTRA_ARGS="--start-population-size 8 --population-size 8" \
+  scripts/mesb/submit_mesb.sh xqc_smoke 0 mesb
+```
+
+**Full run** (defaults: 15 generations, population 32, 100k × 3 seeds):
+
+```bash
+scripts/mesb/start_llm_server.sh 4
+ALGO=xqc GPU_JOBS=16 CHAIN=3 scripts/mesb/submit_mesb.sh mesb_xqc_s0 0 mesb
+```
+
+The driver job asks for 4 CPUs; each gene is its own GPU job, named
+`mesb-<gene id>`, logged to `<run>/logs/eval/<gene>.log`. `GPU_JOBS` caps how
+many are in flight; extra sbatch flags for them go in `GENE_SBATCH_FLAGS`
+(e.g. `"-A coc"`). A gene job that queues and runs for more than
+`--eval-timeout` (6 h) is cancelled and counted as failed.
+
+Time: his NVIDIA jobs took up to 45 min per gene. With 16 in flight a
+generation of 32 genes takes about 1.5–2 h plus LLM time, so 15 generations
+about 25–35 h. The GPU QOS also counts the LLM server's 2 GPUs, so fewer gene
+jobs may run at once; check `squeue -u $USER` in the first generation.
+
+**Matched baseline**: the same command with
+`EXTRA_ARGS="--archive-boundaries fixed --fixed-ranges -500 2000 0 600"`
+(fixed 20×20 grid over his ranges, everything else identical).
+
+Not available for XQC: `behavior_eval.py` videos (SB3 only). XQC's final
+checkpoint is kept in `<run>/models/<gene>/` for a later renderer.
+
 ---
 
 ## Appendix A: files
@@ -574,7 +648,9 @@ are used as they already are at `6b73ae167`.
 | `scripts/mesb/run_mesb.sbatch`, `scripts/mesb/submit_mesb.sh` | Slurm launch |
 | `scripts/mesb/llm_server.sbatch` | local LLM server on the constants' `PORT`, no island controller |
 | `scripts/mesb/start_llm_server.sh` | N chained 8-hour LLM server jobs |
-| `tests/mesb/*` | 106 tests |
+| `sota/MujocoRL/train_gene_xqc.py` | XQC gene → MESB result JSON (Shazeb's validator and trainer; Python 3.9) |
+| `scripts/mesb/xqc_gene.sbatch` | one GPU job per XQC gene |
+| `tests/mesb/*` | 126 tests |
 
 Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
 (`*`, created on first run) keeps them out of git without editing the root
@@ -646,3 +722,14 @@ Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
     stand-in server that failed its first 3 requests: 4 requests reached the
     server at once, the 3 failures were retried, 25 of 26 operator calls
     produced a valid child and the invalid one kept its parent.
+- XQC learner (`aayush/mesb-xqc`):
+  - `pytest tests/mesb`: 126 passed, including the XQC profile, his gene
+    validator on valid and broken genes, the operator, the trainer adapter
+    (command identical to `train_xqc_gene.py`, Python 3.9 syntax), the Slurm
+    evaluator (fake `sbatch`: results, timeout + `scancel`, missing result) and
+    resuming pre-XQC runs.
+  - Real LLM path with the XQC prompts (stand-in server): 21 operator calls,
+    all valid XQC genes, real edits.
+  - Real XQC training (Python 3.9, JAX on CPU, tiny gene, 1,200 steps):
+    `train_gene_xqc.py` alone, a 2-generation MESB run with local processes,
+    and a run through `xqc_gene.sbatch` with a fake `sbatch`.

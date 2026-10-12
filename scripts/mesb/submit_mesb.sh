@@ -15,6 +15,10 @@
 # automatically. A job that finds the run already complete only re-runs the
 # analysis and exits.
 #   CHAIN=3 scripts/mesb/submit_mesb.sh mesb_full_s0 0 mesb
+#
+# XQC learner (Shazeb's island; one GPU job per gene, GPU_JOBS at a time):
+#   ALGO=xqc GPU_JOBS=16 CHAIN=2 scripts/mesb/submit_mesb.sh mesb_xqc_s0 0 mesb
+# The driver job then needs only a few CPUs (default here: -c 4 --mem=16G).
 set -euo pipefail
 cd "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 
@@ -23,6 +27,9 @@ export RUN_NAME
 export SEED="${2:-${SEED:-0}}"
 export SELECTION_MODE="${3:-${SELECTION_MODE:-mesb}}"
 CHAIN="${CHAIN:-1}"
+if [[ "${ALGO:-ppo}" == xqc && -z "${SBATCH_FLAGS:-}" ]]; then
+    SBATCH_FLAGS="-c 4 --mem=16G"   # genes train in their own GPU jobs
+fi
 
 mkdir -p mujoco_rl_output/slurm_logs   # --output dir must exist before sbatch
 prev=""

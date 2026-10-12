@@ -266,7 +266,8 @@ def write_summary(run: dict, figures: list[str], replay_result: dict | None, pat
     lines += [
         f"- selection mode: `{cfg.get('selection_mode')}`, archive boundaries: "
         f"`{cfg.get('archive_boundaries', 'n/a')}`",
-        f"- environment: `{cfg.get('env_id')}`, PPO timesteps {cfg.get('eval_timesteps')}, "
+        f"- environment: `{cfg.get('env_id')}`, learner {str(cfg.get('algo', 'ppo')).upper()}, "
+        f"{cfg.get('eval_timesteps')} timesteps x {cfg.get('eval_num_seeds', 1)} seed(s) per gene, "
         f"eval episodes {cfg.get('eval_episodes')} x {cfg.get('eval_max_steps')} steps, "
         f"seed {cfg.get('seed')}",
         f"- archive dims {cfg.get('mesb_dims')}, remap frequency "

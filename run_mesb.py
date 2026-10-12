@@ -66,7 +66,10 @@ LOCKED_KEYS = (
     "seed", "eval_seed", "env_id", "eval_timesteps", "eval_episodes", "eval_max_steps",
     "start_population_size", "population_size", "num_elites", "crossover_probability",
     "mutation_probability", "llm_backend", "llm_model", "llm_crossover_impl", "evaluator",
+    "algo", "eval_num_seeds", "seed_network",
 )
+#: Values assumed for locked keys that runs made before the key existed lack.
+LOCKED_DEFAULTS = {"algo": "ppo", "eval_num_seeds": 1, "seed_network": None}
 
 
 class CheckpointMismatchError(RuntimeError):
@@ -218,11 +221,16 @@ class MESBRun:
                                    timeout_sec=c["llm_timeout"],
                                    llm_model=c["llm_model"],
                                    crossover_impl=c["llm_crossover_impl"],
-                                   workers=c["llm_workers"])
+                                   workers=c["llm_workers"], algo=c["algo"],
+                                   seed_network=c["seed_network"])
+        profile = C.ALGO_PROFILES[c["algo"]]
         self.evaluator = make_evaluator(c["evaluator"], EvalSettings(
             env_id=c["env_id"], timesteps=c["eval_timesteps"], episodes=c["eval_episodes"],
             max_steps=c["eval_max_steps"], eval_seed=c["eval_seed"], device=c["device"],
-            timeout_sec=c["eval_timeout"], workers=c["workers"], python_cmd=c["eval_python"]))
+            timeout_sec=c["eval_timeout"], workers=c["workers"], python_cmd=c["eval_python"],
+            algo=c["algo"], num_seeds=c["eval_num_seeds"], xqc_seed=c["seed"],
+            slurm_script=str(profile["slurm_script"]) if profile["slurm_script"] else None,
+            slurm_flags=c["slurm_flags"]))
 
     def _write_config(self) -> None:
         cfg = dict(self.cfg)
@@ -245,8 +253,8 @@ class MESBRun:
 
     def _check_resume_config(self) -> None:
         stored = json.loads(self.paths.config.read_text(encoding="utf-8"))
-        diffs = {k: (stored.get(k), self.cfg.get(k)) for k in LOCKED_KEYS
-                 if json.dumps(stored.get(k)) != json.dumps(self.cfg.get(k))}
+        diffs = {k: (stored.get(k, LOCKED_DEFAULTS.get(k)), self.cfg.get(k)) for k in LOCKED_KEYS
+                 if json.dumps(stored.get(k, LOCKED_DEFAULTS.get(k))) != json.dumps(self.cfg.get(k))}
         if diffs:
             raise CheckpointMismatchError(
                 "cannot resume: these settings differ from the checkpointed run "
@@ -547,8 +555,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Required with --archive-boundaries fixed")
 
     g = p.add_argument_group("evaluation")
+    g.add_argument("--algo", choices=sorted(C.ALGO_PROFILES), default=C.ALGO,
+                   help="Learner every gene is trained with: 'ppo' (SB3, sota/MujocoRL) or "
+                        "'xqc' (Shazeb's XQC island, sota/XQC; one GPU job per gene)")
+    g.add_argument("--seed-network", default=None,
+                   help="Starting gene (default: the learner's seed network; e.g. a small "
+                        "XQC gene for a quick CPU test)")
     g.add_argument("--env-id", default=C.ENV_ID)
-    g.add_argument("--eval-timesteps", type=int, default=C.EVAL_TIMESTEPS, help="PPO timesteps")
+    g.add_argument("--eval-timesteps", type=int, default=None,
+                   help="Training steps per gene (default: 500000 for ppo, 100000 for xqc)")
+    g.add_argument("--eval-num-seeds", type=int, default=None,
+                   help="Training seeds per gene, trained together (xqc only; default 3)")
     g.add_argument("--eval-episodes", type=int, default=C.EVAL_EPISODES)
     g.add_argument("--eval-max-steps", type=int, default=C.EVAL_MAX_STEPS)
     g.add_argument("--eval-seed", type=int, default=C.EVAL_SEED)
@@ -559,8 +576,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--eval-python", default=sys.executable,
                    help="Python command for evaluations (e.g. 'uv run --project "
                         "sota/MujocoRL/eval_env python')")
-    g.add_argument("--evaluator", choices=["subprocess", "mock"], default="subprocess",
-                   help="'mock' = synthetic results for plumbing tests only")
+    g.add_argument("--evaluator", choices=["subprocess", "slurm", "mock"], default="subprocess",
+                   help="'subprocess' = local processes; 'slurm' = one sbatch job per gene "
+                        "(xqc); 'mock' = synthetic results for plumbing tests only")
+    g.add_argument("--slurm-flags", default=os.getenv("MESB_GENE_SBATCH_FLAGS", ""),
+                   help="Extra sbatch flags for per-gene jobs (--evaluator slurm)")
 
     g = p.add_argument_group("evolution")
     g.add_argument("--num-generations", type=int, default=C.NUM_GENERATIONS)
@@ -588,6 +608,15 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
     cfg = {k: v for k, v in vars(args).items() if k not in ("resume",)}
     cfg["run_name"] = args.run_name or _dt.datetime.now().strftime("mesb_%Y%m%d_%H%M%S")
     cfg["mesb_dims"] = list(args.mesb_dims)
+    profile = C.ALGO_PROFILES[args.algo]
+    if args.eval_timesteps is None:
+        cfg["eval_timesteps"] = profile["eval_timesteps"]
+    if args.eval_num_seeds is None:
+        cfg["eval_num_seeds"] = profile["eval_num_seeds"]
+    elif args.algo == "ppo" and args.eval_num_seeds != 1:
+        raise SystemExit("--eval-num-seeds applies to --algo xqc only (PPO trains one seed)")
+    if args.evaluator == "slurm" and not profile["slurm_script"]:
+        raise SystemExit(f"--evaluator slurm has no job script for --algo {args.algo}")
     if args.archive_boundaries == "fixed":
         if args.fixed_ranges is None:
             raise SystemExit("--archive-boundaries fixed needs --fixed-ranges DIST_LO DIST_HI "

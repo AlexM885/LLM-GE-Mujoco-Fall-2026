@@ -28,6 +28,7 @@ All randomness comes from Python's global ``random`` module, exactly as in
 from __future__ import annotations
 
 import json
+import os
 import random
 import shlex
 import string
@@ -77,7 +78,8 @@ class Variation:
     def __init__(self, genes_dir: Path, prompts_dir: Path, log_dir: Path, backend: str = "llm",
                  python_cmd: str = sys.executable, timeout_sec: float = C.LLM_TIMEOUT_SEC,
                  top_p: float = C.TOP_P, llm_model: str = C.LLM_MODEL,
-                 crossover_impl: str = "fixed", workers: int = 1) -> None:
+                 crossover_impl: str = "fixed", workers: int = 1, algo: str = C.ALGO,
+                 seed_network: str | Path | None = None) -> None:
         self.genes_dir = Path(genes_dir)
         self.prompts_dir = Path(prompts_dir)
         self.log_dir = Path(log_dir)
@@ -88,10 +90,17 @@ class Variation:
         self.llm_model = llm_model
         self.crossover_impl = crossover_impl
         self.workers = max(1, int(workers))
-        self.templates = sorted((C.ROOT_DIR).glob(C.MUTATION_PROMPT_GLOB))
+        if algo not in C.ALGO_PROFILES:
+            raise ValueError(f"unknown algo {algo!r}; expected one of {sorted(C.ALGO_PROFILES)}")
+        self.algo = algo
+        profile = C.ALGO_PROFILES[algo]
+        self.seed_network = Path(seed_network or profile["seed_network"]).resolve()
+        if not self.seed_network.exists():
+            raise FileNotFoundError(f"seed network not found: {self.seed_network}")
+        self.templates = sorted((C.ROOT_DIR).glob(profile["prompt_glob"]))
         if not self.templates:
-            raise FileNotFoundError(f"no mutation prompts match {C.MUTATION_PROMPT_GLOB}")
-        self.rules = (C.ROOT_DIR / C.CONSTANT_RULES_PATH).read_text(encoding="utf-8")
+            raise FileNotFoundError(f"no mutation prompts match {profile['prompt_glob']}")
+        self.rules = (C.ROOT_DIR / profile["constant_rules"]).read_text(encoding="utf-8")
         for d in (self.genes_dir, self.prompts_dir, self.log_dir):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -99,7 +108,7 @@ class Variation:
         return self.genes_dir / f"network_{gene_id}.py"
 
     def parent_file(self, gene_id: str) -> Path:
-        return C.SEED_NETWORK if gene_id == "seed" else self.gene_file(gene_id)
+        return self.seed_network if gene_id == "seed" else self.gene_file(gene_id)
 
     # ----------------------------------------------------------- planning
     def plan_mutation(self, parent_id: str, temp_range=C.MUTATION_TEMPERATURE,
@@ -136,14 +145,17 @@ class Variation:
     def _run_one(self, job: OperatorJob) -> None:
         cmd = shlex.split(self.python_cmd) + [str(C.LLM_OPERATOR_SCRIPT)] + job.args + [
             "--backend", self.backend, "--top-p", str(self.top_p),
-            "--llm-model", self.llm_model]
+            "--llm-model", self.llm_model, "--algo", self.algo]
+        # The team's operators read src/cfg/constants_Mujoco.py, which switches
+        # seed gene, rules and FORBIDDEN_PATTERNS on LLMGE_ALGO (Shazeb's island).
+        env = dict(os.environ, LLMGE_ALGO=self.algo)
         log_path = self.log_dir / job.log_name
         start = time.time()
         err = None
         try:
             with open(log_path, "w", encoding="utf-8") as log:
                 proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT,
-                                      timeout=self.timeout_sec, cwd=C.ROOT_DIR)
+                                      timeout=self.timeout_sec, cwd=C.ROOT_DIR, env=env)
             if proc.returncode == EXIT_INVALID_CHILD:
                 err = _invalid_reason(log_path) or "invalid child"
             elif proc.returncode != 0:
