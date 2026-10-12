@@ -152,6 +152,7 @@ def unpackIslands(island_specs, checkpoints) -> list[Island]:
             population = checkpoint["population"]
             hof = checkpoint["hof"]
             map_elites_archive = checkpoint.get("MAP_ELITES_ARCHIVE", {})
+            map_elites_curiosity = checkpoint.get("MAP_ELITES_CURIOSITY", {})
         else:
             print("Missing Island ", checkpoint_path)
             exit(0)
@@ -161,7 +162,7 @@ def unpackIslands(island_specs, checkpoints) -> list[Island]:
             individual = Individual(ind[0], ind.fitness.values)
             individuals.append(individual)
         
-        island = Island(checkpoint_path, individuals, map_elites_archive)
+        island = Island(checkpoint_path, individuals, map_elites_archive, map_elites_curiosity)
         islands.append(island)
     return islands
 
@@ -194,6 +195,7 @@ def packIslands(islands: list[Island], gen: int):
             "population": population,
             "hof": hof,
             "MAP_ELITES_ARCHIVE": island.map_elites_archive,
+            "MAP_ELITES_CURIOSITY": island.map_elites_curiosity,
         }
         save_checkpoint(gen=gen, folder_name=island_path, global_path=None, checkpoint_data=checkpoint_data)
 

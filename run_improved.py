@@ -7,6 +7,7 @@ import string
 import random
 import pickle
 import argparse
+import itertools
 import subprocess
 import yaml
 import numpy as np
@@ -39,6 +40,13 @@ MAP_BINS = globals().get("MAP_BINS", 20)
 MAP_ELITES_DESCRIPTORS = globals().get("MAP_ELITES_DESCRIPTORS", [])
 MAP_ELITES_OBJECTIVE = globals().get("MAP_ELITES_OBJECTIVE", "mean_reward")
 FAILED_EVAL_SENTINEL = globals().get("FAILED_EVAL_SENTINEL", -999999.0)
+MAP_ELITES_EMITTER = globals().get("MAP_ELITES_EMITTER", "uniform")
+SPARSE_EMITTER_ALPHA = globals().get("SPARSE_EMITTER_ALPHA", 0.5)
+CURIOSITY_NEW_CELL = globals().get("CURIOSITY_NEW_CELL", 1.0)
+CURIOSITY_REPLACED_ELITE = globals().get("CURIOSITY_REPLACED_ELITE", 0.5)
+CURIOSITY_REJECTED = globals().get("CURIOSITY_REJECTED", -0.1)
+CURIOSITY_DECAY = globals().get("CURIOSITY_DECAY", 0.95)
+SPARSE_EMITTER_MIN_WEIGHT = globals().get("SPARSE_EMITTER_MIN_WEIGHT", 0.01)
 # Budget of successfully trained genes for the whole run; 0 disables it.
 MAX_SUCCESSFUL_EVALS = globals().get("MAX_SUCCESSFUL_EVALS", 0)
 
@@ -988,6 +996,7 @@ def save_checkpoint(gen, folder_name="checkpoints", global_path=None, checkpoint
             "population": population,
             "hof": hof, 
             "MAP_ELITES_ARCHIVE": MAP_ELITES_ARCHIVE,
+            "MAP_ELITES_CURIOSITY": MAP_ELITES_CURIOSITY,
         }
     filename = os.path.join(folder_name, f'checkpoint_gen_{gen}.pkl')
     with open(filename, 'wb') as file:
@@ -1086,6 +1095,62 @@ def get_quality(individual):
         return metrics[MAP_ELITES_OBJECTIVE]
     return individual.fitness.values[0]
 
+def count_occupied_neighbors(bin_idx):
+    """Number of occupied archive cells among those surrounding bin_idx."""
+    count = 0
+    for offset in itertools.product((-1, 0, 1), repeat=len(bin_idx)):
+        if not any(offset):
+            continue
+        if tuple(b + o for b, o in zip(bin_idx, offset)) in MAP_ELITES_ARCHIVE:
+            count += 1
+    return count
+
+def sparse_emitter_weights(bins):
+    """Selection weight of each occupied cell: sparsity blended with curiosity."""
+    weights = []
+    for bin_idx in bins:
+        sparsity = 1.0 / (1 + count_occupied_neighbors(bin_idx))
+        curiosity = MAP_ELITES_CURIOSITY.get(bin_idx, 0.0)
+        weight = (1 - SPARSE_EMITTER_ALPHA) * sparsity + SPARSE_EMITTER_ALPHA * curiosity
+        weights.append(max(weight, SPARSE_EMITTER_MIN_WEIGHT))
+    return weights
+
+def select_parents(k):
+    """Draw k parents from the archive, each tagged with the cell it came from.
+
+    The returned individuals are clones, so the tag never reaches the elites
+    themselves. update_archive() reads it to credit curiosity to that cell.
+    """
+    bins = list(MAP_ELITES_ARCHIVE.keys())
+    if MAP_ELITES_EMITTER == "sparse":
+        weights = sparse_emitter_weights(bins)
+        for bin_idx, weight in sorted(zip(bins, weights), key=lambda bw: -bw[1]):
+            print(f"	‣ Sparse emitter: bin {bin_idx} weight {weight:.3f} "
+                  f"(neighbors {count_occupied_neighbors(bin_idx)}, "
+                  f"curiosity {MAP_ELITES_CURIOSITY.get(bin_idx, 0.0):.3f})")
+        chosen = random.choices(bins, weights=weights, k=k)
+    else:
+        chosen = random.choices(bins, k=k)
+
+    parents = []
+    for bin_idx in chosen:
+        parent = toolbox.clone(MAP_ELITES_ARCHIVE[bin_idx])
+        parent.parent_bin = bin_idx
+        parents.append(parent)
+    return parents
+
+def credit_curiosity(ind, reward):
+    """Add reward to the curiosity of the cell ind's parent was drawn from."""
+    parent_bin = getattr(ind, "parent_bin", None)
+    if parent_bin is None:
+        return
+    MAP_ELITES_CURIOSITY[parent_bin] = MAP_ELITES_CURIOSITY.get(parent_bin, 0.0) + reward
+
+def decay_curiosity():
+    """Fade every cell's curiosity so that recent generations count for more."""
+    for bin_idx in MAP_ELITES_CURIOSITY:
+        MAP_ELITES_CURIOSITY[bin_idx] *= CURIOSITY_DECAY
+
 def update_archive(population):
     """Insert individuals into the MAP-Elites archive, one elite per cell."""
     global MAP_ELITES_ARCHIVE
@@ -1114,12 +1179,18 @@ def update_archive(population):
         if occupant is None:
             MAP_ELITES_ARCHIVE[bin_idx] = ind
             added += 1
+            credit_curiosity(ind, CURIOSITY_NEW_CELL)
             print(f"	‣ MAP-Elites: Added {ind[0]} to bin {bin_idx} with {MAP_ELITES_OBJECTIVE} {quality:.2f}")
         elif quality > get_quality(occupant):
             print(f"	‣ MAP-Elites: Replaced {occupant[0]} with {ind[0]} in bin {bin_idx} "
                   f"({MAP_ELITES_OBJECTIVE}: {get_quality(occupant):.2f} -> {quality:.2f})")
             MAP_ELITES_ARCHIVE[bin_idx] = ind
             replaced += 1
+            credit_curiosity(ind, CURIOSITY_REPLACED_ELITE)
+        elif ind[0] != occupant[0]:
+            # An offspring that came through variation unchanged is still the
+            # occupant itself; that is not a rejection.
+            credit_curiosity(ind, CURIOSITY_REJECTED)
 
     total_cells = MAP_BINS ** len(MAP_ELITES_DESCRIPTORS) if MAP_ELITES_DESCRIPTORS else 0
     coverage = (len(MAP_ELITES_ARCHIVE) / total_cells * 100) if total_cells else 0.0
@@ -1157,6 +1228,7 @@ GLOBAL_DATA_HIST = {}
 GLOBAL_DATA_ANCESTRY = {}
 GLOBAL_DATA_ANCESTRY[MODEL] = {'GENES':[MODEL], 'MUTATE_TYPE':["CREATED"]}
 MAP_ELITES_ARCHIVE = {}
+MAP_ELITES_CURIOSITY = {}
 
 # Main Evolution Loop
 if __name__ == "__main__":
@@ -1193,6 +1265,7 @@ if __name__ == "__main__":
         population = population_data["population"]
         hof = population_data["hof"]
         MAP_ELITES_ARCHIVE = population_data.get("MAP_ELITES_ARCHIVE", {})
+        MAP_ELITES_CURIOSITY = population_data.get("MAP_ELITES_CURIOSITY", {})
     else:
         # Create an initial population
         start_gen = 1
@@ -1272,8 +1345,12 @@ if __name__ == "__main__":
             elites = []
             # Always produce a full batch of offspring, even while the archive
             # holds fewer individuals than population_size.
-            print(f"Selecting {population_size} offspring uniformly from the archive")
-            offspring = [random.choice(population) for _ in range(population_size)]
+            if MAP_ELITES_ARCHIVE:
+                print(f"Selecting {population_size} offspring from the archive ({MAP_ELITES_EMITTER} emitter)")
+                offspring = select_parents(population_size)
+            else:
+                print(f"Selecting {population_size} offspring uniformly from the population")
+                offspring = [random.choice(population) for _ in range(population_size)]
         else:
             elites = tools.selSPEA2(population, num_elites)
 
@@ -1353,6 +1430,7 @@ if __name__ == "__main__":
             # Offspring only survive if they win a cell of the behaviour grid.
             box_print("UPDATING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
             update_archive(offspring)
+            decay_curiosity()
             population[:] = list(MAP_ELITES_ARCHIVE.values()) or offspring
         else:
             # Replace the old population with the offspring
