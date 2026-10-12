@@ -1175,6 +1175,16 @@ if __name__ == "__main__":
         population = population_data["population"]
         hof = population_data["hof"]
         MAP_ELITES_ARCHIVE = population_data.get("MAP_ELITES_ARCHIVE", {})
+        # GLOBAL_DATA only holds the last generation's genes, and the history can
+        # hold stale invalid entries for older elites. The checkpointed fitness is
+        # authoritative: record it so the fitness reset below restores it instead
+        # of marking those elites invalid (-inf) and dropping them.
+        for ind in list(population) + list(MAP_ELITES_ARCHIVE.values()):
+            fit = tuple(ind.fitness.values) if ind.fitness.valid else None
+            if fit and fit not in (tuple(INVALID_FITNESS_MAX), tuple(PLACEHOLDER_FITNESS)):
+                entry = dict(GLOBAL_DATA.get(ind[0]) or GLOBAL_DATA_HIST.get(ind[0]) or {'start_time': time.time()})
+                entry.update(sub_flag=True, status='completed', fitness=fit)
+                GLOBAL_DATA[ind[0]] = entry
     else:
         # Create an initial population
         start_gen = 1
