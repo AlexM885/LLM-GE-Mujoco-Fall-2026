@@ -388,9 +388,13 @@ def extract_code(response: str) -> Optional[str]:
     Returns None only if all tiers fail.
     """
     # Tier 1: explicit ```python fence
-    match = _FENCE_PYTHON_RE.search(response)
-    if match:
-        return match.group(1).strip()
+    fences = [m.group(1).strip() for m in _FENCE_PYTHON_RE.finditer(response)]
+    if fences:
+        first = fences[0]
+        if len(fences) == 1 or ("def get_observation" in first and "def compute_reward" in first):
+            return first
+        # The model put each function in its own fence
+        return "\n\n".join(fences)
 
     # Tier 2: any ``` fence containing Python-ish code
     for match in _FENCE_ANY_RE.finditer(response):

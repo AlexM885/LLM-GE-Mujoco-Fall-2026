@@ -162,6 +162,10 @@ class LLMConfig:
     # "llmge" only: requests in flight at once. Keep it at the server's batch size
     # (BATCH_SIZE in server.py) so that no request waits in the server's queue.
     max_concurrent_requests: int = 8
+    # "llmge" only: the server takes one raw text prompt, so the system/user chat
+    # messages have to be laid out the way the model was trained to read them.
+    # "llama3" for Llama 3.x instruct models, "none" to send plain text.
+    chat_template: str = "none"
     api_base: str = "https://openrouter.ai/api/v1"
     api_key: Optional[str] = None  # None -> read from OPENAI_API_KEY env
     model_name: str = "openai/gpt-4o-mini"

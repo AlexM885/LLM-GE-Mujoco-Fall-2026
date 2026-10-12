@@ -235,6 +235,21 @@ class LLMClient:
 # ---------------------------------------------------------------------------
 
 
+# Llama 3.x instruct chat layout. The tokenizer adds <|begin_of_text|> itself.
+_LLAMA3_TURN = "<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"
+_LLAMA3_ASSISTANT = "<|start_header_id|>assistant<|end_header_id|>\n\n"
+
+
+def format_chat_prompt(system_msg: str, user_msg: str, template: str) -> str:
+    """Turn a system and a user message into the single text prompt the server takes."""
+    if template == "llama3":
+        text = _LLAMA3_TURN.format(role="system", content=system_msg) if system_msg else ""
+        return text + _LLAMA3_TURN.format(role="user", content=user_msg) + _LLAMA3_ASSISTANT
+    if template == "none":
+        return f"{system_msg}\n\n{user_msg}" if system_msg else user_msg
+    raise ValueError(f"Unknown chat_template: {template!r}")
+
+
 class LLMGEServerClient:
     """Client for the LLM-GE model server (server.py at the repository root).
 
@@ -257,7 +272,11 @@ class LLMGEServerClient:
         else:
             # limen/ -> LIMEN-main/ -> MujocoRL/ -> sota/ -> repository root
             self._hostname_file = Path(__file__).resolve().parents[4] / "hostname.log"
-        logger.info("LLMGEServerClient initialized: model=%s url=%s", self._model, self._url())
+        format_chat_prompt("", "", config.chat_template)  # fail early on a bad template name
+        logger.info(
+            "LLMGEServerClient initialized: model=%s url=%s chat_template=%s",
+            self._model, self._url(), config.chat_template,
+        )
 
     def _url(self) -> str:
         base = self.config.api_base
@@ -270,8 +289,9 @@ class LLMGEServerClient:
 
     def generate(self, prompt: Dict[str, str]) -> LLMResponse:
         """Call the server with a prompt dict from PromptBuilder."""
-        system_msg = prompt.get("system", "")
-        text_prompt = f"{system_msg}\n\n{prompt['user']}" if system_msg else prompt["user"]
+        text_prompt = format_chat_prompt(
+            prompt.get("system", ""), prompt["user"], self.config.chat_template
+        )
         payload: Dict[str, Any] = {
             "prompt": text_prompt,
             "max_new_tokens": self.config.max_tokens,

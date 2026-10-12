@@ -54,6 +54,7 @@ llm:
   provider: "llmge"
   api_base: "auto"
   model_name: "meta-llama/Llama-3.3-70B-Instruct"
+  chat_template: "llama3"          # the server takes raw text; lay it out as a Llama 3 chat
   temperature: 0.7
   max_tokens: 4096
   # Seconds to wait for one answer. The server generates a batch of 8 at a
