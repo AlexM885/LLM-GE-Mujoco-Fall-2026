@@ -12,7 +12,7 @@ launch it with EVAL_RUNLINE:
    the run dir, so a crash there never prints a traceback into this job's output.
 3. Writes llmge/results/<gene_id>_results.csv with the columns run_improved.py and
    MAP-Elites read:  mean_reward,std_reward,train_time,param_count,mean_distance,
-   mean_control_cost  (+ algo,timesteps,num_seeds at the end).
+   mean_control_cost  (+ timesteps,num_seeds at the end; all numeric).
    mean_reward = mean over seeds of each seed's 10-episode deterministic return;
    std_reward = std of those per-seed means; param_count = actor parameters.
    Any failure writes the -999999 sentinel row instead, like train_rl.py.
@@ -28,14 +28,16 @@ import importlib.util
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LLMGE_DIR = os.path.join(HERE, "llmge")
-HEADER = "mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost,algo,timesteps,num_seeds"
+# Every column must be numeric: run_improved.py converts the whole row to float.
+HEADER = "mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost,timesteps,num_seeds"
 FAILED = -999999.0
 
 AGENT_KEYS = {
     # architecture
     "hidden_dims_critic": ("dims", 1, 4096),
     "hidden_dims_actor": ("dims", 1, 4096),
-    "n_critics": (int, 1, 10),
+    # XQC's categorical target is computed from exactly 2 critics (critic.py).
+    "n_critics": (int, 2, 2),
     "use_batch_norm": (bool,),
     "use_weight_norm": (bool,),
     "use_layer_norm": (bool,),
@@ -134,7 +136,7 @@ def main():
     def fail(message):
         train_time = time.time() - start
         stats.update(status="failed", error=message, train_time_sec=train_time, mean_reward=FAILED)
-        write_results(gene_id, [FAILED, 0.0, train_time, 999999999, 0.0, 0.0, "xqc", args.timesteps, args.num_seeds], stats)
+        write_results(gene_id, [FAILED, 0.0, train_time, 999999999, 0.0, 0.0, args.timesteps, args.num_seeds], stats)
         print(f"ERROR evaluating generated model: {message}")
         print(f"Mean reward: {FAILED}, Std: 0.0, Time: {train_time:.1f}s")
         print("Job Done")
@@ -172,7 +174,7 @@ def main():
     std_reward = (sum((r - mean_reward) ** 2 for r in per_seed) / len(per_seed)) ** 0.5
     train_time = time.time() - start
     row = [mean_reward, std_reward, train_time, desc["actor_params"], desc["mean_distance"],
-           desc["mean_control_cost"], "xqc", args.timesteps, args.num_seeds]
+           desc["mean_control_cost"], args.timesteps, args.num_seeds]
     stats.update(status="ok", train_time_sec=train_time, mean_reward=mean_reward, std_reward=std_reward,
                  per_seed_return=per_seed, param_count=desc["actor_params"],
                  mean_distance=desc["mean_distance"], mean_control_cost=desc["mean_control_cost"])

@@ -9,8 +9,8 @@ ALGO = "xqc"
 # and an ensemble of categorical critics, both MLPs with batch norm and weight norm.
 # get_architecture_kwargs() must return a dict of network settings for the XQC agent.
 # Only plain Python values (ints, floats, bools, strings, lists of ints) are allowed.
-# Prefer mutating hidden_dims_critic, hidden_dims_actor, n_critics and the
-# normalization flags.
+# Prefer mutating hidden_dims_critic, hidden_dims_actor and the
+# normalization flags. n_critics must stay 2.
 # -- NOTE --
 
 # ===============================
