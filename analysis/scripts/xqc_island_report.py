@@ -151,54 +151,50 @@ def main():
 
 
 def plot(rows, gen_rows, args, path):
+    """One panel: every trained gene (dots), best-so-far (step line across the whole
+    axis) and the seed config on the same seeds (dashed). Counts of invalid and
+    timed-out genes are in generations.csv rather than on the figure."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    ok_c, bad_c, none_c, ink, muted, grid = "#2a78d6", "#eb6834", "#8d8b85", "#0b0b0b", "#52514e", "#e4e3df"
+    dot, ink, muted, grid, bg = "#2a78d6", "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
     gens = [r["generation"] for r in gen_rows]
-    fig, (ax, bx) = plt.subplots(2, 1, figsize=(8, 6.4), sharex=True, gridspec_kw={"height_ratios": [3, 1.2]})
-    fig.patch.set_facecolor("#fcfcfb")
+    lo, hi = gens[0] - 0.5, gens[-1] + 0.5
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    fig.patch.set_facecolor(bg)
     rng = np.random.default_rng(0)
     for g in gens:
         ys = [r["mean_reward"] for r in rows if r["generation"] == g and r["status"] == "ok"]
-        ax.scatter(g + rng.uniform(-0.18, 0.18, len(ys)), ys, s=36, color=ok_c, alpha=0.75,
-                   edgecolor="#fcfcfb", linewidth=1, zorder=3)
-    ax.step(gens, [r["best_so_far"] for r in gen_rows], where="post", color=ink, lw=2, zorder=4)
+        ax.scatter(g + rng.uniform(-0.18, 0.18, len(ys)), ys, s=40, color=dot, alpha=0.75,
+                   edgecolor=bg, linewidth=1, zorder=3)
+    best = [r["best_so_far"] for r in gen_rows]
+    ax.step([lo] + gens[1:] + [hi], best + [best[-1]], where="post", color=ink, lw=2, zorder=4)
+    ax.text(hi - 0.03, best[-1] + 120, f"best so far {best[-1]:,.0f}", ha="right", va="bottom", fontsize=9, color=ink)
     top = max((r for r in rows if r["status"] == "ok"), key=lambda r: r["mean_reward"])
-    ax.annotate(f"best so far: {top['mean_reward']:,.0f}\n(gen {top['generation']}, {top['gene_id'][:8]}…)",
-                (top["generation"], top["mean_reward"]), xytext=(-12, 0), textcoords="offset points",
-                ha="right", va="center", fontsize=9, color=ink)
+    ax.annotate(f"gen {top['generation']}: {top['gene_id'][:8]}…", (top["generation"], top["mean_reward"]),
+                xytext=(-12, 0), textcoords="offset points", ha="right", va="center", fontsize=9, color=ink)
     if args.seed_mean:
         ax.axhline(args.seed_mean, color=muted, lw=1.5, ls="--", zorder=2)
-        ax.text(gens[-1] + 0.45, args.seed_mean, f"seed config,\nsame seeds: {args.seed_mean:,.0f}",
-                va="center", ha="right", fontsize=8.5, color=muted,
-                bbox=dict(facecolor="#fcfcfb", edgecolor="none", pad=1))
+        ax.text(hi - 0.03, args.seed_mean + 120, f"seed config, same seeds {args.seed_mean:,.0f}",
+                ha="right", va="bottom", fontsize=9, color=muted,
+                bbox=dict(facecolor=bg, edgecolor="none", pad=1))
+    ax.set_xlim(lo, hi)
+    ax.set_xticks(gens)
+    ax.set_xlabel("Generation", color=ink)
     ax.set_ylabel("Return (mean of 3 seeds, 100k steps)", color=ink)
-    ax.set_title("Every evaluated gene, XQC island on HalfCheetah-v4", loc="left", fontsize=12, color=ink)
-    ok_n = np.array([r["ok"] for r in gen_rows]); bad_n = np.array([r["invalid"] for r in gen_rows])
-    none_n = np.array([r["no_result"] for r in gen_rows])
-    bx.bar(gens, ok_n, 0.6, color=ok_c, label="trained", edgecolor="#fcfcfb", linewidth=2)
-    bx.bar(gens, bad_n, 0.6, bottom=ok_n, color=bad_c, label="invalid gene", edgecolor="#fcfcfb", linewidth=2)
-    bx.bar(gens, none_n, 0.6, bottom=ok_n + bad_n, color=none_c, label="timed out (1.5 h)",
-           edgecolor="#fcfcfb", linewidth=2)
-    bx.set_ylabel("Genes", color=ink)
-    bx.set_xlabel("Generation", color=ink)
-    bx.set_xticks(gens)
-    bx.legend(loc="upper left", fontsize=8.5, frameon=False, ncol=3, bbox_to_anchor=(0, 1.32))
-    for a in (ax, bx):
-        a.set_facecolor("#fcfcfb")
-        a.grid(axis="y", color=grid, lw=0.8)
-        a.set_axisbelow(True)
-        for s in ("top", "right"):
-            a.spines[s].set_visible(False)
-        for s in ("left", "bottom"):
-            a.spines[s].set_color(muted)
-        a.tick_params(colors=muted)
+    ax.set_title("XQC island on HalfCheetah-v4: every trained gene", loc="left", fontsize=12, color=ink)
+    ax.set_facecolor(bg)
+    ax.grid(axis="y", color=grid, lw=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(muted)
+    ax.tick_params(colors=muted)
     ax.yaxis.set_major_formatter(matplotlib.ticker.StrMethodFormatter("{x:,.0f}"))
     fig.tight_layout()
     fig.savefig(path, dpi=160)
-
 
 if __name__ == "__main__":
     main()
