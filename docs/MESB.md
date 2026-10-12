@@ -27,6 +27,7 @@ files.
 - [19. Fixed-grid comparison](#19-fixed-grid-comparison)
 - [20. Known limitations](#20-known-limitations)
 - [21. XQC learner (`--algo xqc`)](#21-xqc-learner---algo-xqc)
+- [22. Matched runs on Shazeb's XQC island](#22-matched-runs-on-shazebs-xqc-island-scriptsmesbmatched)
 - [Appendix: files, bugs found, tests](#appendix-a-files)
 
 ---
@@ -623,6 +624,75 @@ jobs may run at once; check `squeue -u $USER` in the first generation.
 Not available for XQC: `behavior_eval.py` videos (SB3 only). XQC's final
 checkpoint is kept in `<run>/models/<gene>/` for a later renderer.
 
+## 22. Matched runs on Shazeb's XQC island (`scripts/mesb/matched/`)
+
+The question "does MESB help?" needs two runs that differ only in the archive.
+These runs use **his** pipeline (`run_improved.py`, `LLMGE_ALGO=xqc`), not
+`run_mesb.py`, so the only differences from his `xqc_island_run2` are the
+archive and two agreed fixes, applied to both arms.
+
+| | fixed arm | MESB arm |
+|---|---|---|
+| driver | `run_improved_matched.py` = his `run_improved.py` + marked hooks | same |
+| archive | his `get_bin`: 20 equal bins over (−500, 2000) m and (0, 0.6) per step | 20×20 sliding boundaries, rebuilt after every generation |
+| parents, operators, prompts, validation, gene jobs | his code | his code |
+| crossover | `src/llm_crossover_fixed.py` (chunk-index fix) | same |
+| gene job time limit | 3 h (his 1.5 h timed out 8 of 83 genes) | same |
+| population / generations | 16 / 6 (generations 0–5: his `migration_gen = 5` ends an island there, as in run2) | same |
+| starting population | one shared generation 0 | same |
+
+**How the driver is made.** `build_matched_driver.py` copies his
+`run_improved.py` and inserts 10 calls into `src/mesb_matched.py` at places it
+asserts exist exactly once (marked `# MESB-MATCHED`). If his file changes so a
+place is not found, generation stops instead of guessing. The generated
+driver goes into the run directory, so each run records the exact code used.
+Options come from the environment (`MATCHED_ARCHIVE`, `MATCHED_FIX_CROSSOVER`,
+`MATCHED_GENE_TIME`, `MATCHED_STOP_AFTER_GEN0`).
+
+**Sliding archive in his pipeline.** Every gene his `update_archive` would
+accept goes into a buffer once. After each generation the boundaries are
+recomputed at percentiles of the buffer and the archive is rebuilt (best gene
+per cell, ties keep the earlier gene). The archive keeps his format, so his
+selection (uniform from the elites), checkpoints, resume and
+`xqc_island_report.py` work unchanged. The buffer and boundaries are saved in
+the checkpoint (`MESB_STATE`) and logged to `mesb_boundaries.jsonl`. A
+checkpoint written by one arm cannot be resumed as the other arm.
+
+**Shared generation 0.** `ROLE=gen0` creates and evaluates the starting genes
+once and saves `checkpoint_gen_0.pkl` / `global_gen_0.pkl`. Each arm copies
+that snapshot into its own run directory the first time and resumes from it,
+so both arms select their first parents from the same 16 evaluated genes.
+(`run_improved.py` does not seed its random draws and LLM replies are not
+reproducible, so the arms diverge from generation 1; replicate pairs are the
+answer to that.)
+
+**Run a pair on PACE** (from `aayush/mesb-xqc`, XQC environment installed):
+
+```bash
+scripts/mesb/start_llm_server.sh 3
+until curl -s http://$(cat hostname.log):8169/ | grep -q running; do sleep 30; done
+scripts/mesb/matched/launch_pair.sh xqc_matched_p1 2     # gen 0, then both arms (2 x 16 h each)
+squeue -u $USER
+tail -f mujoco_rl_output/slurm_logs/matched-xqc_matched_p1-*.out
+```
+
+Outputs: `mujoco_rl_output/matched/<pair>/{gen0,fixed,mesb}`, each with his
+layout (`global_data/`, `island_llama3_Mujoco-XQC/`). Genes, results and stats
+go to his `sota/XQC/llmge/{models,results,stats}` (unique gene ids).
+
+**Compare** when both arms finish:
+
+```bash
+uv run python scripts/mesb/matched/compare_arms.py --pair xqc_matched_p1
+```
+
+It runs his report on each arm, then scores both arms on two shared grids (his
+fixed grid, and one sliding grid built from both arms' genes) per generation:
+best-so-far, top-10 mean, median, valid/invalid/timed-out counts, coverage
+and QD score. It writes `compare.md` with the verdict rule agreed in advance
+(MESB helps if it beats the fixed arm on shared-grid coverage and QD score
+without a lower best-so-far), `compare.csv` and `compare.png`.
+
 ---
 
 ## Appendix A: files
@@ -650,7 +720,9 @@ are used as they already are at `6b73ae167`.
 | `scripts/mesb/start_llm_server.sh` | N chained 8-hour LLM server jobs |
 | `sota/MujocoRL/train_gene_xqc.py` | XQC gene → MESB result JSON (Shazeb's validator and trainer; Python 3.9) |
 | `scripts/mesb/xqc_gene.sbatch` | one GPU job per XQC gene |
-| `tests/mesb/*` | 126 tests |
+| `src/mesb_matched.py`, `src/llm_crossover_fixed.py` | hooks for the matched runs; crossover with the chunk-index fix |
+| `scripts/mesb/matched/*` | driver generator, Slurm scripts (shared gen 0 + two arms), arm comparison |
+| `tests/mesb/*` | 135 tests |
 
 Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
 (`*`, created on first run) keeps them out of git without editing the root
@@ -733,3 +805,17 @@ Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
   - Real XQC training (Python 3.9, JAX on CPU, tiny gene, 1,200 steps):
     `train_gene_xqc.py` alone, a 2-generation MESB run with local processes,
     and a run through `xqc_gene.sbatch` with a fake `sbatch`.
+- Matched runs (`scripts/mesb/matched/`):
+  - `pytest tests/mesb`: 135 passed, including the driver generator against
+    the current `run_improved.py` (every original line kept; a changed source
+    is refused), the sliding archive hook (percentile edges, best per cell,
+    duplicates and invalid genes skipped, checkpoint round trip), the Slurm
+    time and crossover hooks, the resume guard between arms, and the fixed
+    crossover (keeps the gene valid where the original drops
+    `get_architecture_kwargs` or the `ALGO` header).
+  - His real pipeline end to end on this machine (fake `sbatch`, stand-in LLM
+    server, tiny real XQC genes): shared generation 0 saved, both arms copied
+    it and ran generations 1–2 side by side, crossover jobs used the fixed
+    script, gene jobs carried `-t 3:00:00`; the MESB arm was stopped and
+    resumed from generation 2 with its buffer and archive intact; his report
+    and `compare_arms.py` ran on both arms.
