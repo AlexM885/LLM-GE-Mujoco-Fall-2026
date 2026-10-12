@@ -680,18 +680,60 @@ Outputs: `mujoco_rl_output/matched/<pair>/{gen0,fixed,mesb}`, each with his
 layout (`global_data/`, `island_llama3_Mujoco-XQC/`). Genes, results and stats
 go to his `sota/XQC/llmge/{models,results,stats}` (unique gene ids).
 
-**Compare** when both arms finish:
+**Post-hoc checks** when both arms finish (no new evolution; one GPU job per gene):
+
+```bash
+uv run python scripts/mesb/matched/posthoc_submit.py --pair xqc_matched_p1
+squeue -u $USER          # 21 jobs: 10 genes per arm + the seed gene
+```
+
+Per arm it picks the same number of genes: the top 5 by the run's reward and 5
+archive elites as far apart as possible in (distance, control cost) (topped up
+with the next-best genes if the archive is small), plus the seed gene once.
+`posthoc_eval.py` retrains each from scratch exactly as in the run (100k steps
+x 3 seeds, his `train_xqc.py` and arguments) but with XQC seed 1000, so the
+training seeds and evaluation episodes are new, then measures without further
+training:
+
+| measured | how |
+|---|---|
+| re-checked reward | mean of the 3 new seeds' 10-episode returns |
+| reward under changed conditions | same rollouts with the MuJoCo model edited: torso mass x1.5, all sliding friction x0.5, back-leg or front-leg motor gear x0.5 |
+| gait features MESB never optimised | share of steps each foot touches the floor, mean torso height, torso angle spread |
+
+It does this without editing his files: his `train_xqc.py` imports
+`llmge_descriptors` at the end of training, so the script runs it in-process
+with a wrapper module under that name that returns his normal result and adds
+the extra rollouts (written to `posthoc_extra.json`).
+
+**Compare**:
 
 ```bash
 uv run python scripts/mesb/matched/compare_arms.py --pair xqc_matched_p1
+cat mujoco_rl_output/matched/xqc_matched_p1/compare/compare.md
 ```
 
-It runs his report on each arm, then scores both arms on two shared grids (his
-fixed grid, and one sliding grid built from both arms' genes) per generation:
-best-so-far, top-10 mean, median, valid/invalid/timed-out counts, coverage
-and QD score. It writes `compare.md` with the verdict rule agreed in advance
-(MESB helps if it beats the fixed arm on shared-grid coverage and QD score
-without a lower best-so-far), `compare.csv` and `compare.png`.
+`compare.md` reports, fixed vs MESB:
+
+- **Primary (post-hoc):** re-checked top-5 reward (next to the same genes'
+  reward during the run, to show selection luck); re-checked best; both vs the
+  seed gene; best reward under each changed condition and their mean
+  ("robustness": does the archive hold a controller that copes?); share of the
+  best reward kept; gait spread (mean pairwise distance of standardised gait
+  features).
+- **Search and diversity during the run:** mean best-so-far over an equal
+  number of evaluated genes (area under the best-vs-evaluations curve), final
+  best and top-10 mean, distinct architectures and distinct settings among
+  valid genes, valid / invalid / timed-out counts.
+- **Secondary, not used for the verdict:** coverage and QD score on shared
+  grids. MESB shapes the grid these are measured on, so they partly measure
+  MESB itself.
+
+**Verdict rule** (fixed before the results): MESB helps if its best reward
+under changed conditions is higher **and** its re-checked top-5 reward is not
+lower than the fixed arm's by more than 2%. One pair is evidence, not proof.
+`compare.png` plots best reward against genes evaluated, the top-10 mean, and
+the two secondary curves.
 
 ---
 
@@ -721,8 +763,8 @@ are used as they already are at `6b73ae167`.
 | `sota/MujocoRL/train_gene_xqc.py` | XQC gene → MESB result JSON (Shazeb's validator and trainer; Python 3.9) |
 | `scripts/mesb/xqc_gene.sbatch` | one GPU job per XQC gene |
 | `src/mesb_matched.py`, `src/llm_crossover_fixed.py` | hooks for the matched runs; crossover with the chunk-index fix |
-| `scripts/mesb/matched/*` | driver generator, Slurm scripts (shared gen 0 + two arms), arm comparison |
-| `tests/mesb/*` | 135 tests |
+| `scripts/mesb/matched/*` | driver generator, Slurm scripts (shared gen 0 + two arms), post-hoc checks (`posthoc_submit.py`, `posthoc_eval.py`, `posthoc_gene.sbatch`), arm comparison |
+| `tests/mesb/*` | 139 tests |
 
 Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
 (`*`, created on first run) keeps them out of git without editing the root
@@ -819,3 +861,11 @@ Run outputs go under `mujoco_rl_output/`. That directory's own `.gitignore`
     script, gene jobs carried `-t 3:00:00`; the MESB arm was stopped and
     resumed from generation 2 with its buffer and archive intact; his report
     and `compare_arms.py` ran on both arms.
+- Post-hoc checks: 139 tests pass (equal-budget efficiency, gene selection,
+  post-hoc summary and verdict, each changed condition edits the MuJoCo
+  model). In the scratch harness, `posthoc_submit.py` picked genes from both
+  arms, 9 of 9 checks (real XQC retraining on CPU) succeeded, and
+  `compare_arms.py` filled every primary metric. A first version of the
+  slippery-floor condition changed only the floor and had no effect (MuJoCo
+  uses the larger friction of the two touching surfaces); it now halves every
+  surface's friction.

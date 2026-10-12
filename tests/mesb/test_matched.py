@@ -179,3 +179,79 @@ def test_fixed_crossover_writes_the_shown_chunk(monkeypatch, tmp_path):
     # the bug: the answer lands one chunk early and overwrites get_architecture_kwargs
     # (or, when the first chunk differs, the ALGO header) -> the trainer rejects the gene
     assert "def get_architecture_kwargs" not in original and original.count("def get_xqc_kwargs") == 2
+
+
+# ------------------------------------------------------------------ post-hoc metrics
+def _compare_module():
+    import compare_arms
+    return importlib.reload(compare_arms)
+
+
+def test_mean_best_over_budget_and_counts():
+    ca = _compare_module()
+    table = [{"evaluated": 4, "best_so_far": 10.0}, {"evaluated": 4, "best_so_far": 20.0},
+             {"evaluated": 4, "best_so_far": 30.0}]
+    ca.add_evaluation_counts(table)
+    assert [r["evaluations_so_far"] for r in table] == [4, 8, 12]
+    assert ca.mean_best_over_budget(table, 8) == 15.0          # equal budget cuts the 3rd gen
+    assert ca.mean_best_over_budget(table, 6) == round((4 * 10 + 2 * 20) / 6, 1)
+
+
+def test_posthoc_selection_is_top_then_far_apart():
+    import posthoc_submit as ps
+    rows = [{"gene_id": f"g{i}", "mean_reward": 100.0 - i, "d": float(i), "c": 0.0} for i in range(10)]
+    chosen = ps.select(rows, {f"g{i}" for i in range(10)}, k_top=2, k_div=2,
+                       scale=[(0.0, 9.0), (0.0, 1.0)])
+    assert [r["gene_id"] for r in chosen] == ["g0", "g1", "g9", "g5"]
+    few = ps.select(rows, {"g9"}, k_top=2, k_div=3, scale=[(0.0, 9.0), (0.0, 1.0)])
+    assert [r["gene_id"] for r in few] == ["g0", "g1", "g9", "g2", "g3"]   # topped up by reward
+
+
+def test_posthoc_summary_and_verdict(tmp_path):
+    import json as _json
+    ca = _compare_module()
+    pair = tmp_path / "p"
+    sel = {"seed": [{"gene_id": "seed", "role": "reference"}],
+           "fixed": [{"gene_id": "a", "role": "top", "run_reward": 9000.0},
+                     {"gene_id": "b", "role": "diverse", "run_reward": 8000.0}],
+           "mesb": [{"gene_id": "c", "role": "top", "run_reward": 9100.0},
+                    {"gene_id": "d", "role": "diverse", "run_reward": 7000.0}]}
+    (pair / "posthoc").mkdir(parents=True)
+    (pair / "posthoc" / "selection.json").write_text(_json.dumps({"k_top": 1, "genes": sel}))
+
+    def res(group, gid, reward, cond, gait):
+        d = pair / "posthoc" / group
+        d.mkdir(exist_ok=True)
+        (d / f"{gid}.json").write_text(_json.dumps({
+            "status": "success", "mean_reward": reward,
+            "perturbations": {"heavy_torso": {"mean_return": cond}, "slippery_floor": {"mean_return": cond}},
+            "gait": {"mean": dict(zip(("back_foot_contact", "front_foot_contact", "torso_height_mean",
+                                       "torso_angle_std"), gait))}}))
+    res("seed", "seed", 7000.0, 5000.0, (0.5, 0.5, 0.0, 0.1))
+    res("fixed", "a", 8500.0, 6000.0, (0.5, 0.5, 0.0, 0.1))
+    res("fixed", "b", 7500.0, 6500.0, (0.6, 0.4, 0.0, 0.1))
+    res("mesb", "c", 8600.0, 7000.0, (0.2, 0.8, 0.1, 0.2))
+    res("mesb", "d", 6000.0, 7200.0, (0.9, 0.1, -0.1, 0.05))
+    post = ca.posthoc_summary(pair)
+    f, m = post["arms"]["fixed"], post["arms"]["mesb"]
+    assert f["recheck_top5_mean"] == 8500.0 and m["recheck_top5_mean"] == 8600.0
+    assert f["robustness_score"] == 6500.0 and m["robustness_score"] == 7200.0
+    assert m["gait_spread"] > f["gait_spread"]
+    assert m["improvement_over_seed_best"] == round((8600 - 7000) / 7000, 3)
+    assert ca.verdict(post) == (True, True)
+    (pair / "posthoc" / "mesb" / "c.json").unlink()
+    (pair / "posthoc" / "mesb" / "d.json").unlink()
+    assert ca.verdict(ca.posthoc_summary(pair)) is None           # incomplete -> pending
+
+
+def test_perturbations_change_the_model():
+    pytest.importorskip("mujoco")
+    gym = pytest.importorskip("gymnasium")
+    import posthoc_eval as pe
+    base = gym.make("HalfCheetah-v4").unwrapped.model
+    for name in pe.PERTURBATIONS:
+        m = gym.make("HalfCheetah-v4").unwrapped.model
+        pe.apply_perturbation(name, m)
+        changed = any((getattr(m, a) != getattr(base, a)).any()
+                      for a in ("body_mass", "body_inertia", "geom_friction", "actuator_gear"))
+        assert changed, name
