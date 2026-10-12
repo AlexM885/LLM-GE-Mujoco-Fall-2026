@@ -151,8 +151,9 @@ def main():
 
 
 def plot(rows, gen_rows, args, path):
-    """One panel: every trained gene (dots), best-so-far (step line across the whole
-    axis) and the seed config on the same seeds (dashed). Counts of invalid and
+    """One panel: every trained gene as a light dot, the best gene of each generation
+    as a dark dot, and a line through the best score found so far at each generation.
+    The seed config on the same seeds is the dashed line. Counts of invalid and
     timed-out genes are in generations.csv rather than on the figure."""
     import matplotlib
     matplotlib.use("Agg")
@@ -160,32 +161,27 @@ def plot(rows, gen_rows, args, path):
 
     dot, ink, muted, grid, bg = "#2a78d6", "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
     gens = [r["generation"] for r in gen_rows]
-    lo, hi = gens[0] - 0.5, gens[-1] + 0.5
-    fig, ax = plt.subplots(figsize=(8, 4.6))
+    fig, ax = plt.subplots(figsize=(8, 5))
     fig.patch.set_facecolor(bg)
     rng = np.random.default_rng(0)
     for g in gens:
         ys = [r["mean_reward"] for r in rows if r["generation"] == g and r["status"] == "ok"]
-        ax.scatter(g + rng.uniform(-0.18, 0.18, len(ys)), ys, s=40, color=dot, alpha=0.75,
-                   edgecolor=bg, linewidth=1, zorder=3)
+        ax.scatter(g + rng.uniform(-0.15, 0.15, len(ys)), ys, s=34, color=dot, alpha=0.45,
+                   edgecolor=bg, linewidth=1, zorder=3, label="one gene" if g == gens[0] else None)
     best = [r["best_so_far"] for r in gen_rows]
-    ax.step([lo] + gens[1:] + [hi], best + [best[-1]], where="post", color=ink, lw=2, zorder=4)
-    ax.text(hi - 0.03, best[-1] + 120, f"best so far {best[-1]:,.0f}", ha="right", va="bottom", fontsize=9, color=ink)
-    top = max((r for r in rows if r["status"] == "ok"), key=lambda r: r["mean_reward"])
-    ax.annotate(f"gen {top['generation']}: {top['gene_id'][:8]}…", (top["generation"], top["mean_reward"]),
-                xytext=(-12, 0), textcoords="offset points", ha="right", va="center", fontsize=9, color=ink)
+    ax.plot(gens, best, color=ink, lw=2, marker="o", ms=8, markeredgecolor=bg, markeredgewidth=2, zorder=4,
+            label="best gene found so far")
+    for g, b, prev in zip(gens, best, [None] + best[:-1]):
+        if b != prev:
+            ax.text(g, b + 160, f"{b:,.0f}", ha="center", va="bottom", fontsize=9, color=ink)
     if args.seed_mean:
-        ax.axhline(args.seed_mean, color=muted, lw=1.5, ls="--", zorder=2)
-        # Label in the sparsest generation column, under the line.
-        sparse = min(gens, key=lambda g: sum(r["generation"] == g and r["status"] == "ok" for r in rows))
-        ax.text(sparse, args.seed_mean - 120, f"seed config, same seeds {args.seed_mean:,.0f}",
-                ha="center", va="top", fontsize=9, color=muted,
-                bbox=dict(facecolor=bg, edgecolor="none", pad=1))
-    ax.set_xlim(lo, hi)
+        ax.axhline(args.seed_mean, color=muted, lw=1.5, ls="--", zorder=2, label=f"original settings ({args.seed_mean:,.0f})")
+    ax.set_xlim(gens[0] - 0.5, gens[-1] + 0.5)
     ax.set_xticks(gens)
     ax.set_xlabel("Generation", color=ink)
-    ax.set_ylabel("Return (mean of 3 seeds, 100k steps)", color=ink)
-    ax.set_title("XQC island on HalfCheetah-v4: every trained gene", loc="left", fontsize=12, color=ink)
+    ax.set_ylabel("Score (average of 3 seeds)", color=ink)
+    ax.set_title("Score of every gene the XQC island trained", loc="left", fontsize=12, color=ink)
+    ax.legend(loc="upper left", bbox_to_anchor=(0, -0.14), ncol=3, fontsize=9, frameon=False)
     ax.set_facecolor(bg)
     ax.grid(axis="y", color=grid, lw=0.8)
     ax.set_axisbelow(True)
