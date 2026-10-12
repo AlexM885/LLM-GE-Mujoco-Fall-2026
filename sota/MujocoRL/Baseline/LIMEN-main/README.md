@@ -43,7 +43,7 @@ This copy has an extra `gymnasium` adapter that runs LIMEN on the same problem a
 Run it on the cluster from the repository root, with the LLM server running (`sbatch server.sh`):
 
 ```bash
-sbatch sota/MujocoRL/LIMEN-main/slurm/limen_run.sh [RUN_DIR]
+sbatch sota/MujocoRL/Baseline/LIMEN-main/slurm/limen_run.sh [RUN_DIR]
 ```
 
 `slurm/limen_run.sh` is the controller job (the counterpart of `run.sh`). It submits every training as its own job (`slurm/train_job.sh`, same resources as an LLM-GE evaluation job), stops before its time limit and resubmits itself with `--resume` until the budget is spent. Everything the run writes is under `RUN_DIR` (default `baseline_runs/limen/walker2d`): the archive, `best_interface.py`, `trained_models/` (one TD3 model and its interface code per candidate) and `job_logs/`. Pass a new `RUN_DIR` to start a separate run.
@@ -51,8 +51,8 @@ sbatch sota/MujocoRL/LIMEN-main/slurm/limen_run.sh [RUN_DIR]
 Without SLURM, the trainings of a batch run as local processes:
 
 ```bash
-uv run --project sota/MujocoRL/LIMEN-main python sota/MujocoRL/LIMEN-main/run.py \
-    --config sota/MujocoRL/LIMEN-main/configs/gym_walker2d.yaml
+uv run --project sota/MujocoRL/Baseline/LIMEN-main python sota/MujocoRL/Baseline/LIMEN-main/run.py \
+    --config sota/MujocoRL/Baseline/LIMEN-main/configs/gym_walker2d.yaml
 ```
 
 `configs/gym_walker2d_local.yaml` is a tiny version for testing. The original tasks below need `uv pip install -e ".[original]"`.

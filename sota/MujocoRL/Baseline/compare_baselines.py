@@ -6,7 +6,7 @@ are placed on the LLM-GE MAP-Elites grid (MAP_BINS x MAP_BINS over the two
 foot-contact proportions), so that best fitness, coverage and QD-score mean
 the same thing as the numbers run_improved.py prints for LLM-GE.
 
-    python sota/MujocoRL/compare_baselines.py \
+    python sota/MujocoRL/Baseline/compare_baselines.py \
         --limen baseline_runs/limen/walker2d \
         --pga baseline_runs/pga_map_elites/seed0_job6202104 \
         --timesteps 26000000

@@ -30,8 +30,11 @@ import gymnasium as gym
 import jax
 import numpy as np
 
-# sota/MujocoRL holds eval.py and network.py
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# sota/MujocoRL holds eval.py and network.py: the first folder above this one with eval.py
+_mujoco_rl_dir = os.path.dirname(os.path.abspath(__file__))
+while not os.path.isfile(os.path.join(_mujoco_rl_dir, "eval.py")):
+    _mujoco_rl_dir = os.path.dirname(_mujoco_rl_dir)
+sys.path.append(_mujoco_rl_dir)
 from eval import evaluate_model, make_env, validate_reward_spec  # noqa: E402
 
 

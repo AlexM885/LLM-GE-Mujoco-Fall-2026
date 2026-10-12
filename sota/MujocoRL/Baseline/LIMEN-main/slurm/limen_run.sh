@@ -8,7 +8,7 @@
 # LIMEN controller for the Walker2d-v5 / TD3 baseline. The counterpart of run.sh.
 #
 # Usage, from the repository root, with the LLM server running (sbatch server.sh):
-#   sbatch sota/MujocoRL/LIMEN-main/slurm/limen_run.sh [RUN_DIR]
+#   sbatch sota/MujocoRL/Baseline/LIMEN-main/slurm/limen_run.sh [RUN_DIR]
 #
 # The controller only asks the LLM for candidates and waits; every training is
 # its own job (slurm/train_job.sh). It stops before the time limit and resubmits
@@ -20,7 +20,7 @@ module load cuda
 
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
 cd "$REPO_ROOT"
-LIMEN_DIR="$REPO_ROOT/sota/MujocoRL/LIMEN-main"
+LIMEN_DIR="$REPO_ROOT/sota/MujocoRL/Baseline/LIMEN-main"
 # Everything this run writes goes under RUN_DIR; pass a new RUN_DIR for a new run.
 RUN_DIR="${1:-$REPO_ROOT/baseline_runs/limen/walker2d}"
 LOG_DIR="$RUN_DIR/job_logs"

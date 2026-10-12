@@ -270,8 +270,12 @@ class LLMGEServerClient:
         if config.hostname_file:
             self._hostname_file = Path(config.hostname_file)
         else:
-            # limen/ -> LIMEN-main/ -> MujocoRL/ -> sota/ -> repository root
-            self._hostname_file = Path(__file__).resolve().parents[4] / "hostname.log"
+            # The repository root is the first folder above this one that holds server.py
+            root = next(
+                (p for p in Path(__file__).resolve().parents if (p / "server.py").is_file()),
+                Path.cwd(),
+            )
+            self._hostname_file = root / "hostname.log"
         format_chat_prompt("", "", config.chat_template)  # fail early on a bad template name
         logger.info(
             "LLMGEServerClient initialized: model=%s url=%s chat_template=%s",

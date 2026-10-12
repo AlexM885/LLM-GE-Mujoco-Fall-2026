@@ -81,7 +81,7 @@ This copy no longer uses QDgym/PyBullet. It runs on the same task as `../train_r
 On the cluster, submit it from the repository root as one CPU-only job (no LLM server needed):
 
 ```shell script
-sbatch sota/MujocoRL/PGA-MAP-Elites-master/slurm/pga_run.sh [SEED] [RUN_DIR]
+sbatch sota/MujocoRL/Baseline/PGA-MAP-Elites-master/slurm/pga_run.sh [SEED] [RUN_DIR]
 ```
 
 The job stops the search after `--max_hours` (6.5 of its 8 hours) even if the step budget is not spent, so that the archive, models and final evaluation are always written; there is no resume. Check the last `Timesteps:` line of the job output to see whether the budget was reached.
@@ -89,7 +89,7 @@ The job stops the search after `--max_hours` (6.5 of its 8 hours) even if the st
 Or run it directly from the repository root with the evaluation environment:
 
 ```shell script
-uv run --project sota/MujocoRL/eval_env python sota/MujocoRL/PGA-MAP-Elites-master/main.py --config_file sota/MujocoRL/PGA-MAP-Elites-master/configure_experiment/Walker2d_config.txt --save_path pga_me_output
+uv run --project sota/MujocoRL/eval_env python sota/MujocoRL/Baseline/PGA-MAP-Elites-master/main.py --config_file sota/MujocoRL/Baseline/PGA-MAP-Elites-master/configure_experiment/Walker2d_config.txt --save_path pga_me_output
 ```
 
 `Walker2d_local_config.txt` is a small configuration for testing. The QD*_config.txt and config_*.txt files are the original PyBullet configs and will not run. The rest of this readme describes the original code.

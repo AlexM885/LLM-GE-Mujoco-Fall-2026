@@ -8,7 +8,8 @@
 # PGA-MAP-Elites baseline on Walker2d-v5. One CPU-only job, no LLM server.
 #
 # Usage, from the repository root:
-#   sbatch sota/MujocoRL/PGA-MAP-Elites-master/slurm/pga_run.sh [SEED] [RUN_DIR]
+#   sbatch sota/MujocoRL/Baseline/PGA-MAP-Elites-master/slurm/pga_run.sh [SEED] [RUN_DIR]
+# A different step budget than the config: PGA_MAX_TIMESTEPS=26000000 sbatch ...
 #
 # Walker2d_config.txt starts 24 evaluation and 8 variation processes; keep
 # -c in line with --num_cpu / --num_cpu_var if you change them.
@@ -18,7 +19,7 @@ module load uv
 
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
 cd "$REPO_ROOT"
-PGA_DIR="$REPO_ROOT/sota/MujocoRL/PGA-MAP-Elites-master"
+PGA_DIR="$REPO_ROOT/sota/MujocoRL/Baseline/PGA-MAP-Elites-master"
 SEED="${1:-0}"
 # Everything this run writes goes under RUN_DIR; the job id keeps reruns apart.
 RUN_DIR="${2:-$REPO_ROOT/baseline_runs/pga_map_elites/seed${SEED}_job${SLURM_JOB_ID:-$$}}"
@@ -34,5 +35,6 @@ env -u VIRTUAL_ENV uv run --isolated --project sota/MujocoRL/eval_env python "$P
     --config_file "$PGA_DIR/configure_experiment/Walker2d_config.txt" \
     --seed "$SEED" \
     --save_path "$RUN_DIR" \
-    --max_hours 6.5
+    --max_hours 6.5 \
+    ${PGA_MAX_TIMESTEPS:+--max_timesteps "$PGA_MAX_TIMESTEPS"}
 echo "PGA-MAP-Elites finished with status $?"

@@ -11,7 +11,11 @@ import os
 import sys
 import numpy as np
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# sota/MujocoRL is the first folder above this one that holds eval.py
+_mujoco_rl_dir = os.path.dirname(os.path.abspath(__file__))
+while not os.path.isfile(os.path.join(_mujoco_rl_dir, "eval.py")):
+    _mujoco_rl_dir = os.path.dirname(_mujoco_rl_dir)
+sys.path.append(_mujoco_rl_dir)
 from eval import make_env, validate_reward_spec, get_foot_geom_ids, _feet_in_contact
 from eval import DEFAULT_ENV_ID, WALKER_MAX_EPISODE_STEPS
 
