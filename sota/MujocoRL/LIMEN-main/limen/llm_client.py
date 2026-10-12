@@ -250,6 +250,8 @@ class LLMGEServerClient:
     def __init__(self, config: LLMConfig):
         self.config = config
         self._model = config.model_name
+        # The server answers a batch at a time; more requests than that only queue up
+        self._slots = threading.BoundedSemaphore(max(config.max_concurrent_requests, 1))
         if config.hostname_file:
             self._hostname_file = Path(config.hostname_file)
         else:
@@ -288,8 +290,9 @@ class LLMGEServerClient:
                 url, data=body, headers={"Content-Type": "application/json"}
             )
             try:
-                with urllib.request.urlopen(request, timeout=self.config.timeout) as response:
-                    text = json.loads(response.read()).get("generated_text", "")
+                with self._slots:
+                    with urllib.request.urlopen(request, timeout=self.config.timeout) as response:
+                        text = json.loads(response.read()).get("generated_text", "")
                 return LLMResponse(
                     text=text,
                     code=extract_code(text),
@@ -297,7 +300,11 @@ class LLMGEServerClient:
                     output_tokens=0,
                     model=self._model,
                 )
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            except urllib.error.HTTPError as e:
+                # The server answered with an error; asking again would not help
+                raise RuntimeError(f"LLM-GE server at {url} returned HTTP {e.code}: {e.reason}") from e
+            except urllib.error.URLError as e:
+                # Nothing is listening (yet): the request was never accepted, so it is safe to retry
                 if time.time() >= deadline:
                     raise RuntimeError(f"LLM-GE server at {url} not reachable: {e}") from e
                 logger.warning(
@@ -305,6 +312,13 @@ class LLMGEServerClient:
                     url, e, self._POLL_SECONDS,
                 )
                 time.sleep(self._POLL_SECONDS)
+            except TimeoutError as e:
+                # The server accepted the request and is still generating. It cannot be
+                # cancelled, so sending it again would only pile more work onto its queue.
+                raise RuntimeError(
+                    f"LLM-GE server at {url} accepted the request but did not answer within "
+                    f"{self.config.timeout}s (llm.timeout)"
+                ) from e
 
 
 # ---------------------------------------------------------------------------

@@ -115,6 +115,8 @@ class EvolutionController:
         self.total_train_timesteps = 0
         # True when run() stopped early because of config.max_wall_time_hours
         self.stopped_for_wall_time = False
+        # True when run() gave up because no candidate could be generated at all
+        self.aborted = False
 
     def _candidate_timesteps(self) -> int:
         """Training timesteps a candidate costs when it passes every stage."""
@@ -208,7 +210,7 @@ class EvolutionController:
                     break
                 batch_start = time.time()
                 try:
-                    self._run_batch(executor, batch_size)
+                    generated = self._run_batch(executor, batch_size)
                 except KeyboardInterrupt:
                     logger.info("Interrupted at iteration %d", self.iteration)
                     break
@@ -216,6 +218,14 @@ class EvolutionController:
                     logger.exception("Error in batch at iteration %d", self.iteration)
                     continue
                 longest_batch = max(longest_batch, time.time() - batch_start)
+                if generated == 0:
+                    # Every LLM call of the batch failed; another batch would fail the same way
+                    logger.error(
+                        "No candidate could be generated in this batch (is the LLM server "
+                        "up and answering?). Stopping; resume with --resume once it is fixed."
+                    )
+                    self.aborted = True
+                    break
 
                 # Checkpoint
                 if (
@@ -504,9 +514,13 @@ class EvolutionController:
 
         return response, result
 
-    def _run_batch(self, executor: ThreadPoolExecutor, batch_size: int) -> None:
-        """Prepare, submit, and collect one batch of candidates."""
+    def _run_batch(self, executor: ThreadPoolExecutor, batch_size: int) -> int:
+        """Prepare, submit, and collect one batch of candidates.
+
+        Returns the number of candidates the LLM answered for.
+        """
         batch_start = time.time()
+        generated = 0
 
         # 1. Prepare batch on main thread (reads DB)
         batch = []
@@ -538,6 +552,7 @@ class EvolutionController:
                 logger.exception("[Iter %d] Worker failed", self.iteration)
                 continue
 
+            generated += 1
             self._record_tokens(response)
 
             if result is None:
@@ -589,6 +604,8 @@ class EvolutionController:
             if self.db.should_migrate():
                 n_migrated = self.db.migrate()
                 logger.info("[Iter %d] Migrated %d programs", self.iteration, n_migrated)
+
+        return generated
 
     # ------------------------------------------------------------------
     # Logging

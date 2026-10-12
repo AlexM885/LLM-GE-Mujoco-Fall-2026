@@ -314,6 +314,8 @@ def main():
     print(f"  Checkpoint:    {run_dir}")
     print(f"{'=' * 60}")
 
+    if controller.aborted:
+        sys.exit(1)
     if controller.stopped_for_wall_time:
         # Tells the job script to resubmit with --resume
         sys.exit(3)

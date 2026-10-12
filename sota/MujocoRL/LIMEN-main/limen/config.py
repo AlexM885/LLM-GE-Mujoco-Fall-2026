@@ -159,6 +159,9 @@ class LLMConfig:
     # hostname_file and the port from LLMGE_PORT, as LLM-GE does.
     provider: str = "openai"
     hostname_file: Optional[str] = None  # None -> hostname.log at the LLM-GE repository root
+    # "llmge" only: requests in flight at once. Keep it at the server's batch size
+    # (BATCH_SIZE in server.py) so that no request waits in the server's queue.
+    max_concurrent_requests: int = 8
     api_base: str = "https://openrouter.ai/api/v1"
     api_key: Optional[str] = None  # None -> read from OPENAI_API_KEY env
     model_name: str = "openai/gpt-4o-mini"
