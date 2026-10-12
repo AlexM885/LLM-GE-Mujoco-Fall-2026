@@ -112,7 +112,7 @@ def main():
         for src, dst in [(model, "models"), (f"{LLMGE}/results/{gene}_results.csv", "results"), (stats_path, "stats")]:
             if os.path.exists(src):
                 shutil.copy2(src, f"{args.out}/data/{dst}/")
-    rows.sort(key=lambda r: (r["generation"], r["status"] != "ok", -(r["mean_reward"] or 0)))
+    rows.sort(key=lambda r: (r["generation"], r["status"] != "ok", -(r["mean_reward"] or 0), r["gene_id"]))
     with open(f"{args.out}/genes.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
