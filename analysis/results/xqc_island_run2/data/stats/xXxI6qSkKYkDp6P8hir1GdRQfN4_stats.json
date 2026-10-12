@@ -1,0 +1,12 @@
+{
+  "gene_id": "xXxI6qSkKYkDp6P8hir1GdRQfN4",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxI6qSkKYkDp6P8hir1GdRQfN4",
+  "status": "failed",
+  "error": "invalid gene: ValueError(\"gene declares ALGO=None, expected 'xqc'\")",
+  "train_time_sec": 0.005181789398193359,
+  "mean_reward": -999999.0
+}

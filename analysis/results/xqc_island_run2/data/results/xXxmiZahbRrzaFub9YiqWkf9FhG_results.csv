@@ -1,0 +1,2 @@
+mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost,timesteps,num_seeds
+7158.832492475175,585.596823120099,3541.944630384445,207150,371.6381585023546,0.2739306775719176,100000,3

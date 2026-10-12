@@ -1,0 +1,52 @@
+{
+  "gene_id": "xXxmiZahbRrzaFub9YiqWkf9FhG",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxmiZahbRrzaFub9YiqWkf9FhG",
+  "config": {
+    "hidden_dims_critic": [
+      1024,
+      512,
+      512,
+      256
+    ],
+    "hidden_dims_actor": [
+      256,
+      256,
+      256,
+      256
+    ],
+    "n_critics": 2,
+    "use_batch_norm": true,
+    "use_weight_norm": false,
+    "use_layer_norm": true,
+    "pre_activation_bn": false,
+    "normalize_last_layer": false,
+    "skip_connections": true,
+    "actor_lr": 0.0003,
+    "critic_lr": 0.0002,
+    "temp_lr": 0.0001,
+    "lr_end": 1e-05,
+    "tau": 0.005,
+    "policy_delay": 3,
+    "init_temperature": 0.2,
+    "weight_decay": 0.001,
+    "batch_size": 1024,
+    "updates_per_step": 2
+  },
+  "command": "/storage/ice1/0/9/swani8/xqc-baseline/venv/bin/python /storage/ice1/0/9/swani8/xqc-baseline/repo/sota/XQC/train_xqc.py env=HalfCheetah-v4 seed=0 num_seeds=3 max_steps=100000 eval_interval=25000 eval_episodes=10 start_training=5000 run_dir=/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxmiZahbRrzaFub9YiqWkf9FhG checkpoint_interval=0 save_replay_buffer=false final_descriptors=true resume=never agent.hidden_dims_critic=[1024,512,512,256] agent.hidden_dims_actor=[256,256,256,256] agent.n_critics=2 agent.use_batch_norm=true agent.use_weight_norm=false agent.use_layer_norm=true agent.pre_activation_bn=false agent.normalize_last_layer=false agent.skip_connections=true agent.actor_lr=0.0003 agent.critic_lr=0.0002 agent.temp_lr=0.0001 agent.lr_end=1e-05 agent.tau=0.005 agent.policy_delay=3 agent.init_temperature=0.2 agent.weight_decay=0.001 batch_size=1024 updates_per_step=2",
+  "status": "ok",
+  "train_time_sec": 3541.944630384445,
+  "mean_reward": 7158.832492475175,
+  "std_reward": 585.596823120099,
+  "per_seed_return": [
+    7968.741468096215,
+    6604.141411679217,
+    6903.614597650092
+  ],
+  "param_count": 207150,
+  "mean_distance": 371.6381585023546,
+  "mean_control_cost": 0.2739306775719176
+}
