@@ -20,6 +20,7 @@ output/
 **/weights/
 **/results/
 **/llmge_models/
+sota/MujocoRL/seed_repro_test/
 slurm-*.out
 *.pkl
 *_temp_*
