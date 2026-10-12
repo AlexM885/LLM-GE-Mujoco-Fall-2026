@@ -176,8 +176,10 @@ def plot(rows, gen_rows, args, path):
                 xytext=(-12, 0), textcoords="offset points", ha="right", va="center", fontsize=9, color=ink)
     if args.seed_mean:
         ax.axhline(args.seed_mean, color=muted, lw=1.5, ls="--", zorder=2)
-        ax.text(hi - 0.03, args.seed_mean + 120, f"seed config, same seeds {args.seed_mean:,.0f}",
-                ha="right", va="bottom", fontsize=9, color=muted,
+        # Label in the sparsest generation column, under the line.
+        sparse = min(gens, key=lambda g: sum(r["generation"] == g and r["status"] == "ok" for r in rows))
+        ax.text(sparse, args.seed_mean - 120, f"seed config, same seeds {args.seed_mean:,.0f}",
+                ha="center", va="top", fontsize=9, color=muted,
                 bbox=dict(facecolor=bg, edgecolor="none", pad=1))
     ax.set_xlim(lo, hi)
     ax.set_xticks(gens)
