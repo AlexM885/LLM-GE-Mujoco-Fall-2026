@@ -61,3 +61,35 @@ def rollout_descriptors(agent, env_name, num_seeds, num_episodes=10, seed=0, act
         "mean_distance": float(distances.mean()),
         "mean_control_cost": float(ctrl_costs.mean()),
     }
+
+
+def record_videos(agent, env_name, num_seeds, out_dir, steps=300, seed=0, action_repeat=1, fps=20, scale=2):
+    """Roll out each seed's actor deterministically for `steps` steps and save
+    out_dir/seed<s>.gif (frames downsampled by `scale`) plus returns.json with
+    each seed's return over the recorded steps."""
+    import os
+    import json
+    import imageio
+
+    os.makedirs(out_dir, exist_ok=True)
+    envs = [make_env(env_name, seed=seed, action_repeat=action_repeat) for _ in range(num_seeds)]
+    obs = np.stack([env.reset(seed=seed + 1000 * s)[0] for s, env in enumerate(envs)]).astype(np.float32)
+    frames = [[] for _ in range(num_seeds)]
+    returns = np.zeros(num_seeds)
+    done = np.zeros(num_seeds, dtype=bool)
+    for _ in range(steps):
+        actions = np.asarray(agent.sample_actions(obs, temperature=0.0))
+        for s, env in enumerate(envs):
+            if done[s]:
+                continue
+            frames[s].append(env.render()[::scale, ::scale])
+            o, r, term, trunc, _ = env.step(actions[s])
+            obs[s] = o
+            returns[s] += r
+            done[s] = term or trunc
+    for s, env in enumerate(envs):
+        imageio.mimsave(os.path.join(out_dir, f"seed{s}.gif"), frames[s], duration=1000 / fps, loop=0)
+        env.close()
+    with open(os.path.join(out_dir, "returns.json"), "w") as f:
+        json.dump({"steps": steps, "return_per_seed": returns.tolist()}, f, indent=2)
+    return returns

@@ -1,0 +1,198 @@
+"""Per-gene and per-generation report for one LLM-GE XQC island run, plus a figure.
+
+Everything comes from files the run itself saved (nothing from logs or memory):
+  <run>/global_data/global_gen_<N>.pkl      GLOBAL_DATA (genes touched in gen N),
+                                            GLOBAL_DATA_ANCESTRY (parents, operator)
+  <run>/island_*/checkpoint_gen_<N>.pkl     MAP-Elites archive after gen N
+  sota/XQC/llmge/models/network_<id>.py     the gene the LLM wrote
+  sota/XQC/llmge/results/<id>_results.csv   score written by train_xqc_gene.py
+  sota/XQC/llmge/stats/<id>_stats.json      per-seed returns, config, error message
+
+Generation of a gene: 0 if its ancestry is just CREATED (initial population; these
+are taken from the ancestry log), otherwise the first global_gen_<N>.pkl that lists it. Status: "ok" (trained),
+"invalid" (rejected by validation or crashed; -999999 sentinel), "no_result"
+(no results file: the eval job hit its wall time). Fitness is always read from
+the results CSV, because GLOBAL_DATA_HIST can hold stale -inf entries.
+
+Run from the repo root with the main uv env (unpickling needs deap):
+    uv run python analysis/scripts/xqc_island_report.py xqc_island_run2 \
+        --out analysis/results/xqc_island_run2 --seed-mean 6970
+Writes genes.csv, generations.csv, fitness_by_generation.png into --out and copies
+every gene file, results CSV and stats JSON of the run into --out/data/.
+analysis/results is gitignored (**/results/), so commit a report with git add -f.
+"""
+
+import argparse
+import csv
+import glob
+import importlib.util
+import json
+import os
+import pickle
+import shutil
+
+import numpy as np
+
+LLMGE = "sota/XQC/llmge"
+FAILED = -999999.0
+
+
+def load_cfg(path):
+    spec = importlib.util.spec_from_file_location("gene", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return {**mod.get_architecture_kwargs(), **mod.get_xqc_kwargs()}
+
+
+def read_result(gene):
+    path = f"{LLMGE}/results/{gene}_results.csv"
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        row = list(csv.DictReader(f))[-1]
+    return {k: float(v) for k, v in row.items()}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("run", help="run directory, e.g. xqc_island_run2")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--seed-mean", type=float, help="seed config's mean on the same seeds/budget (reference line)")
+    args = ap.parse_args()
+
+    gens = sorted(int(p.rsplit("_", 1)[1][:-4]) for p in glob.glob(f"{args.run}/global_data/global_gen_*.pkl"))
+    first_seen, ancestry = {}, {}
+    for g in gens:
+        with open(f"{args.run}/global_data/global_gen_{g}.pkl", "rb") as f:
+            gd = pickle.load(f)
+        for k in gd["GLOBAL_DATA"]:
+            first_seen.setdefault(k, g)
+        ancestry.update(gd["GLOBAL_DATA_ANCESTRY"])
+
+    seed_cfg = load_cfg(f"{LLMGE}/network.py")
+    os.makedirs(f"{args.out}/data/models", exist_ok=True)
+    os.makedirs(f"{args.out}/data/results", exist_ok=True)
+    os.makedirs(f"{args.out}/data/stats", exist_ok=True)
+
+    # The initial population is only guaranteed to be in the ancestry log.
+    genes = set(first_seen) | {k for k, a in ancestry.items() if a["MUTATE_TYPE"] == ["CREATED"] and k != "network"}
+    rows = []
+    for gene in genes:
+        anc = ancestry.get(gene, {"GENES": [gene], "MUTATE_TYPE": ["CREATED"]})
+        gen = 0 if anc["MUTATE_TYPE"] == ["CREATED"] else first_seen[gene]
+        model = f"{LLMGE}/models/network_{gene}.py"
+        text = open(model).read() if os.path.exists(model) else ""
+        origin = "seed population" if gen == 0 else ("crossover" if "GeneCrossed" in text else "mutation")
+        parent = anc["GENES"][-2] if len(anc["GENES"]) > 1 else ""
+        res = read_result(gene)
+        stats_path = f"{LLMGE}/stats/{gene}_stats.json"
+        stats = json.load(open(stats_path)) if os.path.exists(stats_path) else {}
+        if res is None:
+            status = "no_result"
+        elif res["mean_reward"] <= FAILED:
+            status = "invalid"
+        else:
+            status = "ok"
+        diff = {}
+        if status == "ok":
+            cfg = stats.get("config") or load_cfg(model)
+            diff = {k: v for k, v in cfg.items() if seed_cfg.get(k) != v}
+        rows.append({
+            "gene_id": gene, "generation": gen, "origin": origin, "operator": anc["MUTATE_TYPE"][-1],
+            "parent": parent, "status": status, "error": stats.get("error", ""),
+            "mean_reward": res["mean_reward"] if status == "ok" else "",
+            "std_reward": res["std_reward"] if status == "ok" else "",
+            "per_seed_return": json.dumps([round(x, 1) for x in stats.get("per_seed_return", [])]),
+            "mean_distance": res["mean_distance"] if status == "ok" else "",
+            "mean_control_cost": res["mean_control_cost"] if status == "ok" else "",
+            "actor_params": int(res["param_count"]) if status == "ok" else "",
+            "train_minutes": round(res["train_time"] / 60, 1) if res else "",
+            "changes_vs_seed": json.dumps(diff),
+        })
+        for src, dst in [(model, "models"), (f"{LLMGE}/results/{gene}_results.csv", "results"), (stats_path, "stats")]:
+            if os.path.exists(src):
+                shutil.copy2(src, f"{args.out}/data/{dst}/")
+    rows.sort(key=lambda r: (r["generation"], r["status"] != "ok", -(r["mean_reward"] or 0), r["gene_id"]))
+    with open(f"{args.out}/genes.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+
+    score = {r["gene_id"]: r["mean_reward"] for r in rows if r["status"] == "ok"}
+    gen_rows, best = [], -np.inf
+    for g in [0] + gens:
+        rs = [r for r in rows if r["generation"] == g]
+        ok = [r["mean_reward"] for r in rs if r["status"] == "ok"]
+        best = max([best] + ok)
+        cells = qd = ""
+        ckpt = glob.glob(f"{args.run}/island_*/checkpoint_gen_{g}.pkl")
+        if ckpt:
+            with open(ckpt[0], "rb") as f:
+                archive = pickle.load(f)["MAP_ELITES_ARCHIVE"]
+            cells = len(archive)
+            qd = round(sum(score.get(ind[0], 0.0) for ind in archive.values()), 1)
+        gen_rows.append({
+            "generation": g, "evaluated": len(rs), "ok": len(ok),
+            "invalid": sum(r["status"] == "invalid" for r in rs),
+            "no_result": sum(r["status"] == "no_result" for r in rs),
+            "crossover_invalid": sum(r["status"] == "invalid" and r["origin"] == "crossover" for r in rs),
+            "crossover_total": sum(r["origin"] == "crossover" for r in rs),
+            "best_this_gen": round(max(ok), 1) if ok else "", "best_so_far": round(best, 1),
+            "median_ok": round(float(np.median(ok)), 1) if ok else "",
+            "archive_cells": cells, "archive_qd_score": qd,
+        })
+    with open(f"{args.out}/generations.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(gen_rows[0]))
+        w.writeheader()
+        w.writerows(gen_rows)
+    plot(rows, gen_rows, args, f"{args.out}/fitness_by_generation.png")
+    for r in gen_rows:
+        print(r)
+
+
+def plot(rows, gen_rows, args, path):
+    """One panel: every trained gene as a light dot, the best gene of each generation
+    as a dark dot, and a line through the best score found so far at each generation.
+    The seed config on the same seeds is the dashed line. Counts of invalid and
+    timed-out genes are in generations.csv rather than on the figure."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    dot, ink, muted, grid, bg = "#2a78d6", "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
+    gens = [r["generation"] for r in gen_rows]
+    fig, ax = plt.subplots(figsize=(8, 5))
+    fig.patch.set_facecolor(bg)
+    rng = np.random.default_rng(0)
+    for g in gens:
+        ys = [r["mean_reward"] for r in rows if r["generation"] == g and r["status"] == "ok"]
+        ax.scatter(g + rng.uniform(-0.15, 0.15, len(ys)), ys, s=34, color=dot, alpha=0.45,
+                   edgecolor=bg, linewidth=1, zorder=3, label="one gene" if g == gens[0] else None)
+    best = [r["best_so_far"] for r in gen_rows]
+    ax.plot(gens, best, color=ink, lw=2, marker="o", ms=8, markeredgecolor=bg, markeredgewidth=2, zorder=4,
+            label="best gene found so far")
+    for g, b, prev in zip(gens, best, [None] + best[:-1]):
+        if b != prev:
+            ax.text(g, b + 160, f"{b:,.0f}", ha="center", va="bottom", fontsize=9, color=ink)
+    if args.seed_mean:
+        ax.axhline(args.seed_mean, color=muted, lw=1.5, ls="--", zorder=2, label=f"original settings ({args.seed_mean:,.0f})")
+    ax.set_xlim(gens[0] - 0.5, gens[-1] + 0.5)
+    ax.set_xticks(gens)
+    ax.set_xlabel("Generation", color=ink)
+    ax.set_ylabel("Score (average of 3 seeds)", color=ink)
+    ax.set_title("Score of every gene the XQC island trained", loc="left", fontsize=12, color=ink)
+    ax.legend(loc="upper left", bbox_to_anchor=(0, -0.14), ncol=3, fontsize=9, frameon=False)
+    ax.set_facecolor(bg)
+    ax.grid(axis="y", color=grid, lw=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(muted)
+    ax.tick_params(colors=muted)
+    ax.yaxis.set_major_formatter(matplotlib.ticker.StrMethodFormatter("{x:,.0f}"))
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+
+if __name__ == "__main__":
+    main()
