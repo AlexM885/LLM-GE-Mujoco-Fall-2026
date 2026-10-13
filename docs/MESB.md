@@ -676,6 +676,15 @@ squeue -u $USER
 tail -f mujoco_rl_output/slurm_logs/matched-xqc_matched_p1-*.out
 ```
 
+Each arm is a chain of jobs (`afterany`). His driver runs every launch up to
+the next multiple of `migration_gen`, so a part that starts after generation 5
+would run generations 6-10. `matched_island.sbatch` therefore exits at once
+when the arm already has `checkpoint_gen_5.pkl` (`MATCHED_LAST_GEN`). Pair
+`xqc_matched_p1` was launched before this check: its fixed arm finished
+generation 5 in part 1 (13.3 h) and part 2 was cancelled during generation 6;
+`compare_arms.py` and `posthoc_submit.py` take `--max-gen 5` (default) and
+ignore anything later.
+
 Outputs: `mujoco_rl_output/matched/<pair>/{gen0,fixed,mesb}`, each with his
 layout (`global_data/`, `island_llama3_Mujoco-XQC/`). Genes, results and stats
 go to his `sota/XQC/llmge/{models,results,stats}` (unique gene ids).
@@ -713,7 +722,12 @@ uv run python scripts/mesb/matched/compare_arms.py --pair xqc_matched_p1
 cat mujoco_rl_output/matched/xqc_matched_p1/compare/compare.md
 ```
 
-`compare.md` reports, fixed vs MESB:
+`compare.md` reports, fixed vs MESB (generations 0 to `--max-gen`, default 5):
+
+- **High-quality cells:** cells of the shared sliding grid whose elite reaches
+  80% of the best reward of both arms (`--hq-fraction`). Coverage counts poor
+  cells and QD rewards filling them; this counts only cells that are both new
+  and good, which is the goal of the run.
 
 - **Primary (post-hoc):** re-checked top-5 reward (next to the same genes'
   reward during the run, to show selection luck); re-checked best; both vs the

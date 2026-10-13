@@ -12,6 +12,10 @@
    - each arm's own archive size (from his report's generations.csv).
 3. Search efficiency: best-so-far against the number of genes evaluated, and its
    average over an equal evaluation budget (area under that curve).
+   - high-quality cells: cells of the shared sliding grid whose elite reaches
+     --hq-fraction (0.8) of the pooled best reward (diverse AND good).
+   Only generations 0..--max-gen (5) are used, so an arm that ran extra
+   generations is compared on the same budget.
 4. Gene diversity: distinct network architectures and distinct full settings
    among each arm's valid genes (read with Shazeb's gene validator).
 5. Post-hoc checks, when posthoc_submit.py jobs have finished: each arm's
@@ -67,11 +71,14 @@ def sliding_cell(d, c, edges):
     return tuple(out)
 
 
-def load_genes(path):
+def load_genes(path, max_gen=None):
+    """Rows of a report's genes.csv; generations after ``max_gen`` are dropped."""
     rows = []
     with open(path, newline="") as fh:
         for r in csv.DictReader(fh):
             r["generation"] = int(r["generation"])
+            if max_gen is not None and r["generation"] > max_gen:
+                continue
             r["ok"] = r["status"] == "ok"
             for k in ("mean_reward", "mean_distance", "mean_control_cost"):
                 try:
@@ -92,7 +99,16 @@ def archive_stats(genes, cell_fn, offset=0.0):
     return len(best), sum(v - offset for v in best.values())
 
 
-def per_generation(rows, edges, offset):
+def high_quality_cells(genes, cell_fn, threshold):
+    """Cells on a grid whose best gene reaches ``threshold``: diverse AND good."""
+    best = {}
+    for g in genes:
+        c = cell_fn(g["mean_distance"], g["mean_control_cost"])
+        best[c] = max(best.get(c, -math.inf), g["mean_reward"])
+    return sum(v >= threshold for v in best.values())
+
+
+def per_generation(rows, edges, offset, hq_threshold=math.inf):
     out = []
     for gen in sorted({r["generation"] for r in rows}):
         upto = [r for r in rows if r["generation"] <= gen and r["ok"] and math.isfinite(r["mean_reward"])]
@@ -111,6 +127,8 @@ def per_generation(rows, edges, offset):
             "median_ok_this_gen": round(st.median(ok_now), 1) if ok_now else None,
             "shared_fixed_cells": fc, "shared_fixed_qd": round(fq, 1),
             "shared_sliding_cells": sc, "shared_sliding_qd": round(sq, 1),
+            "high_quality_cells": high_quality_cells(upto, lambda d, c: sliding_cell(d, c, edges),
+                                                     hq_threshold),
         })
     return out
 
@@ -239,6 +257,10 @@ def main(argv=None):
     p.add_argument("--base", default=str(REPO_ROOT / "mujoco_rl_output" / "matched"))
     p.add_argument("--out", default=None, help="default: <base>/<pair>/compare")
     p.add_argument("--skip-reports", action="store_true", help="reuse existing report outputs")
+    p.add_argument("--max-gen", type=int, default=5,
+                   help="last generation compared (default 5, as in run2); later ones are ignored")
+    p.add_argument("--hq-fraction", type=float, default=0.8,
+                   help="high-quality cell = elite reward >= this fraction of the pooled best")
     args = p.parse_args(argv)
     pair_dir = Path(args.base) / args.pair
     out = Path(args.out) if args.out else pair_dir / "compare"
@@ -250,7 +272,7 @@ def main(argv=None):
         if not args.skip_reports:
             subprocess.run([sys.executable, str(REPO_ROOT / "analysis/scripts/xqc_island_report.py"),
                             str(pair_dir / arm), "--out", str(rep)], check=True, cwd=REPO_ROOT)
-        genes[arm] = load_genes(rep / "genes.csv")
+        genes[arm] = load_genes(rep / "genes.csv", args.max_gen)
 
     pooled = [g for arm in ARMS for g in genes[arm] if g["ok"] and math.isfinite(g["mean_reward"])]
     edges = [compute_boundaries_1d([g[k] for g in pooled], BINS).tolist()
@@ -258,7 +280,9 @@ def main(argv=None):
     # QD needs non-negative terms: shift by the worst valid reward of either arm when
     # it is negative (XQC rewards are normally in the thousands, offset 0).
     offset = min(0.0, min(g["mean_reward"] for g in pooled))
-    table = {arm: per_generation(genes[arm], edges, offset) for arm in ARMS}
+    top = max(g["mean_reward"] for g in pooled)
+    hq_threshold = top * args.hq_fraction if top > 0 else top
+    table = {arm: per_generation(genes[arm], edges, offset, hq_threshold) for arm in ARMS}
     for arm in ARMS:
         add_evaluation_counts(table[arm])
     budget = min(table[arm][-1]["evaluations_so_far"] for arm in ARMS)
@@ -274,11 +298,12 @@ def main(argv=None):
             for row in table[arm]:
                 w.writerow({"arm": arm, **row})
     (out / "shared_grid_edges.json").write_text(json.dumps(
-        {"bins": BINS, "pooled_valid_genes": len(pooled), "qd_offset": offset, "edges": edges},
+        {"bins": BINS, "pooled_valid_genes": len(pooled), "qd_offset": offset, "edges": edges,
+         "max_gen": args.max_gen, "high_quality_threshold": hq_threshold},
         indent=2))
 
     last = {arm: table[arm][-1] for arm in ARMS}
-    lines = [f"# Matched pair {args.pair}: fixed grid vs MESB", ""]
+    lines = [f"# Matched pair {args.pair}: fixed grid vs MESB (generations 0-{args.max_gen})", ""]
     lines += ["## Primary metrics (post-hoc checks)", ""]
     if post and all(post["arms"].get(a, {}).get("checked") for a in ARMS):
         fa, ma = post["arms"]["fixed"], post["arms"]["mesb"]
@@ -308,6 +333,9 @@ def main(argv=None):
               f"{efficiency['mesb']} |"]
     for key in ("best_so_far", "top10_mean_so_far"):
         lines.append(f"| {key} (final) | {last['fixed'][key]} | {last['mesb'][key]} |")
+    lines.append(f"| high-quality cells (shared grid, elite >= {round(hq_threshold, 1)}, "
+                 f"{args.hq_fraction:.0%} of pooled best) | {last['fixed']['high_quality_cells']} | "
+                 f"{last['mesb']['high_quality_cells']} |")
     for key in ("distinct_architectures", "distinct_settings", "valid_genes_read"):
         lines.append(f"| {key} | {diversity['fixed'][key]} | {diversity['mesb'][key]} |")
     totals = {arm: {k: sum(r[k] for r in table[arm]) for k in ("evaluated", "ok", "invalid", "no_result")}

@@ -197,6 +197,36 @@ def test_mean_best_over_budget_and_counts():
     assert ca.mean_best_over_budget(table, 6) == round((4 * 10 + 2 * 20) / 6, 1)
 
 
+def test_generation_cap_and_high_quality_cells(tmp_path):
+    ca = _compare_module()
+    import posthoc_submit as ps
+    csv_path = tmp_path / "genes.csv"
+    csv_path.write_text(
+        "gene_id,generation,status,mean_reward,mean_distance,mean_control_cost\n"
+        "a,0,ok,100,1,0.1\nb,5,ok,90,2,0.2\nc,6,ok,999,3,0.3\nd,5,invalid,,,\n")
+    assert [r["gene_id"] for r in ca.load_genes(csv_path, max_gen=5)] == ["a", "b", "d"]
+    assert len(ca.load_genes(csv_path)) == 4
+    assert [r["gene_id"] for r in ps.ok_genes(tmp_path, max_gen=5)] == ["a", "b"]
+    genes = [{"mean_distance": d, "mean_control_cost": 0.0, "mean_reward": r}
+             for d, r in ((0, 100), (0, 50), (1, 70), (2, 85))]
+    cell = lambda d, c: (int(d), 0)                       # noqa: E731
+    assert ca.high_quality_cells(genes, cell, 80) == 2      # cells 0 (100) and 2 (85)
+    island = tmp_path / "run" / "island_x"
+    island.mkdir(parents=True)
+    import pickle
+    for g, ids in ((5, ["g5"]), (6, ["g6"])):
+        with open(island / f"checkpoint_gen_{g}.pkl", "wb") as fh:
+            pickle.dump({"MAP_ELITES_ARCHIVE": {(0, 0): ids}}, fh)
+    assert ps.final_archive_ids(tmp_path / "run", max_gen=5) == {"g5"}
+    assert ps.final_archive_ids(tmp_path / "run") == {"g6"}
+
+
+def test_sbatch_stops_an_arm_that_finished(tmp_path):
+    text = (REPO / "scripts/mesb/matched/matched_island.sbatch").read_text()
+    guard = text.index('checkpoint_gen_${LAST_GEN}.pkl')
+    assert guard < text.index("build_matched_driver.py --out")   # before any work is started
+
+
 def test_posthoc_selection_is_top_then_far_apart():
     import posthoc_submit as ps
     rows = [{"gene_id": f"g{i}", "mean_reward": 100.0 - i, "d": float(i), "c": 0.0} for i in range(10)]

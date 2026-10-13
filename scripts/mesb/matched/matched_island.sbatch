@@ -70,6 +70,13 @@ if [[ "$ROLE" != gen0 && ! -d "$RUN_DIR/global_data" ]]; then
     cp "$GEN0_DIR/global_data/global_gen_0.pkl" "$RUN_DIR/global_data/"
     echo "copied the shared generation 0 from $GEN0_DIR"
 fi
+# His driver runs each launch to the next multiple of migration_gen (5), so a
+# chained part started after generation 5 would run generations 6-10. Stop here.
+LAST_GEN="${MATCHED_LAST_GEN:-5}"
+if [[ "$ROLE" != gen0 && -f "$RUN_DIR/$ISLAND/checkpoint_gen_${LAST_GEN}.pkl" ]]; then
+    echo "$ROLE arm already finished generation $LAST_GEN; nothing to do"
+    exit 0
+fi
 if [[ "$ROLE" == gen0 && -f "$RUN_DIR/$ISLAND/checkpoint_gen_0.pkl" ]]; then
     echo "generation 0 already saved in $RUN_DIR; nothing to do"
     exit 0

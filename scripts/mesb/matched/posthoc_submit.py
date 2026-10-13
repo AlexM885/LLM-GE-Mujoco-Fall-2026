@@ -36,11 +36,13 @@ SEED_GENE = REPO_ROOT / "sota" / "XQC" / "llmge" / "network.py"
 JOB_SCRIPT = REPO_ROOT / "scripts" / "mesb" / "matched" / "posthoc_gene.sbatch"
 
 
-def ok_genes(report_dir):
+def ok_genes(report_dir, max_gen=None):
     rows = []
     with open(Path(report_dir) / "genes.csv", newline="") as fh:
         for r in csv.DictReader(fh):
             if r["status"] != "ok":
+                continue
+            if max_gen is not None and int(r["generation"]) > max_gen:
                 continue
             try:
                 r["mean_reward"] = float(r["mean_reward"])
@@ -52,9 +54,10 @@ def ok_genes(report_dir):
     return rows
 
 
-def final_archive_ids(run_dir):
-    ckpts = sorted(glob.glob(f"{run_dir}/island_*/checkpoint_gen_*.pkl"),
-                   key=lambda p: int(p.rsplit("_", 1)[1][:-4]))
+def final_archive_ids(run_dir, max_gen=None):
+    gen_of = lambda p: int(p.rsplit("_", 1)[1][:-4])  # noqa: E731
+    ckpts = sorted((p for p in glob.glob(f"{run_dir}/island_*/checkpoint_gen_*.pkl")
+                    if max_gen is None or gen_of(p) <= max_gen), key=gen_of)
     if not ckpts:
         return set()
     try:
@@ -95,6 +98,7 @@ def main(argv=None):
     p.add_argument("--base", default=str(REPO_ROOT / "mujoco_rl_output" / "matched"))
     p.add_argument("--k-top", type=int, default=5)
     p.add_argument("--k-diverse", type=int, default=5)
+    p.add_argument("--max-gen", type=int, default=5, help="ignore genes and archives after this generation")
     p.add_argument("--seed", type=int, default=1000)
     p.add_argument("--timesteps", type=int, default=100_000)
     p.add_argument("--num-seeds", type=int, default=3)
@@ -105,8 +109,9 @@ def main(argv=None):
     reports = pair / "compare"
     if not all((reports / arm / "genes.csv").exists() for arm in ARMS):
         subprocess.run([sys.executable, str(REPO_ROOT / "scripts/mesb/matched/compare_arms.py"),
-                        "--pair", args.pair, "--base", args.base], check=True, cwd=REPO_ROOT)
-    rows = {arm: ok_genes(reports / arm) for arm in ARMS}
+                        "--pair", args.pair, "--base", args.base, "--max-gen", str(args.max_gen)],
+                       check=True, cwd=REPO_ROOT)
+    rows = {arm: ok_genes(reports / arm, args.max_gen) for arm in ARMS}
     pooled = rows["fixed"] + rows["mesb"]
     scale = []
     for k in ("d", "c"):
@@ -114,7 +119,8 @@ def main(argv=None):
         scale.append((lo, (hi - lo) or 1.0))
     selection = {"seed": [{"gene_id": "seed", "gene_file": str(SEED_GENE), "role": "reference"}]}
     for arm in ARMS:
-        chosen = select(rows[arm], final_archive_ids(pair / arm), args.k_top, args.k_diverse, scale)
+        chosen = select(rows[arm], final_archive_ids(pair / arm, args.max_gen), args.k_top, args.k_diverse,
+                        scale)
         selection[arm] = [{"gene_id": r["gene_id"],
                            "gene_file": str(GENES_DIR / f"network_{r['gene_id']}.py"),
                            "run_reward": r["mean_reward"], "distance": r["d"], "control_cost": r["c"],
@@ -123,7 +129,7 @@ def main(argv=None):
     out = pair / "posthoc"
     out.mkdir(parents=True, exist_ok=True)
     (out / "selection.json").write_text(json.dumps(
-        {"seed": args.seed, "timesteps": args.timesteps, "num_seeds": args.num_seeds,
+        {"seed": args.seed, "timesteps": args.timesteps, "num_seeds": args.num_seeds, "max_gen": args.max_gen,
          "k_top": args.k_top, "k_diverse": args.k_diverse, "genes": selection}, indent=2))
     n = 0
     for arm, genes in selection.items():
