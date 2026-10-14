@@ -19,6 +19,20 @@ Run from the repo root with the main uv env (unpickling needs deap):
         --out analysis/results/xqc_island_run2 --seed-mean 6970
 Writes genes.csv, generations.csv, fitness_by_generation.png into --out and copies
 every gene file, results CSV and stats JSON of the run into --out/data/.
+
+Multi-objective runs (LLMGE_ARCHIVE=mome: each archive cell holds a Pareto front)
+are detected from the checkpoint. genes.csv then also has speed (mean_return_forward),
+effort (-mean_return_ctrl), foot_contact_0/1 and the gene's foot-contact cell;
+generations.csv has the archive metrics, all with the fixed reference point
+REFERENCE = (speed 0, effort 600) so they compare across runs:
+  archive_cells / coverage_pct   filled cells of the MAP_BINS x MAP_BINS grid
+  archive_genes                  genes on all cell fronts
+  moqd_score                     sum over cells of the hypervolume of the cell's front
+  global_hypervolume             hypervolume of the Pareto front of every archive gene
+  max_speed, mean_speed          over the genes trained so far (status ok)
+Extra figures: pareto_front.png (speed vs effort of every trained gene, the
+non-dominated ones joined as a staircase) and foot_contact_map.png (best score in
+each foot-contact cell of the final archive).
 analysis/results is gitignored (**/results/), so commit a report with git add -f.
 """
 
@@ -35,6 +49,39 @@ import numpy as np
 
 LLMGE = "sota/XQC/llmge"
 FAILED = -999999.0
+REFERENCE = (0.0, 600.0)   # (speed, effort); constants_Mujoco.MOME_REFERENCE_POINT = (0, -600)
+MAP_BINS = 32              # constants_Mujoco.py, LLMGE_ARCHIVE=mome
+
+
+def is_mome(archive):
+    """MOME checkpoints map each cell to a list of individuals (its front)."""
+    return any(len(v) and isinstance(v[0], list) for v in archive.values())
+
+
+def members(archive):
+    return [ind for v in archive.values() for ind in v] if is_mome(archive) else list(archive.values())
+
+
+def hypervolume(points):
+    """Area of (speed, effort) points' dominated region: more speed and less effort
+    are better, bounded by REFERENCE."""
+    pts = sorted({(s, e) for s, e in points if s > REFERENCE[0] and e < REFERENCE[1]}, key=lambda p: -p[0])
+    hv, low = 0.0, REFERENCE[1]
+    for s, e in pts:
+        if e < low:
+            hv += (s - REFERENCE[0]) * (low - e)
+            low = e
+    return hv
+
+
+def pareto(points):
+    """Non-dominated (speed, effort) points, sorted by effort."""
+    return sorted(p for p in set(points)
+                  if not any(q[0] >= p[0] and q[1] <= p[1] and q != p for q in points))
+
+
+def cell_of(fc0, fc1):
+    return tuple(min(int(min(max(x, 0.0), 1.0) * MAP_BINS), MAP_BINS - 1) for x in (fc0, fc1))
 
 
 def load_cfg(path):
@@ -97,6 +144,14 @@ def main():
         if status == "ok":
             cfg = stats.get("config") or load_cfg(model)
             diff = {k: v for k, v in cfg.items() if seed_cfg.get(k) != v}
+        mo = {}
+        if res is not None and "foot_contact_0" in res:
+            ok = status == "ok"
+            mo = {"speed": res["mean_return_forward"] if ok else "",
+                  "effort": -res["mean_return_ctrl"] if ok else "",
+                  "foot_contact_0": res["foot_contact_0"] if ok else "",
+                  "foot_contact_1": res["foot_contact_1"] if ok else "",
+                  "cell": " ".join(map(str, cell_of(res["foot_contact_0"], res["foot_contact_1"]))) if ok else ""}
         rows.append({
             "gene_id": gene, "generation": gen, "origin": origin, "operator": anc["MUTATE_TYPE"][-1],
             "parent": parent, "status": status, "error": stats.get("error", ""),
@@ -108,29 +163,44 @@ def main():
             "actor_params": int(res["param_count"]) if status == "ok" else "",
             "train_minutes": round(res["train_time"] / 60, 1) if res else "",
             "changes_vs_seed": json.dumps(diff),
+            **mo,
         })
         for src, dst in [(model, "models"), (f"{LLMGE}/results/{gene}_results.csv", "results"), (stats_path, "stats")]:
             if os.path.exists(src):
                 shutil.copy2(src, f"{args.out}/data/{dst}/")
     rows.sort(key=lambda r: (r["generation"], r["status"] != "ok", -(r["mean_reward"] or 0), r["gene_id"]))
+    fields = list(dict.fromkeys(k for r in rows for k in r))
     with open(f"{args.out}/genes.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w = csv.DictWriter(f, fieldnames=fields, restval="")
         w.writeheader()
         w.writerows(rows)
 
     score = {r["gene_id"]: r["mean_reward"] for r in rows if r["status"] == "ok"}
-    gen_rows, best = [], -np.inf
+    objs = {r["gene_id"]: (r["speed"], r["effort"]) for r in rows if r["status"] == "ok" and r.get("speed") != ""
+            and "speed" in r}
+    gen_rows, best, archive = [], -np.inf, {}
     for g in [0] + gens:
         rs = [r for r in rows if r["generation"] == g]
         ok = [r["mean_reward"] for r in rs if r["status"] == "ok"]
         best = max([best] + ok)
         cells = qd = ""
+        mo = {}
         ckpt = glob.glob(f"{args.run}/island_*/checkpoint_gen_{g}.pkl")
         if ckpt:
             with open(ckpt[0], "rb") as f:
                 archive = pickle.load(f)["MAP_ELITES_ARCHIVE"]
             cells = len(archive)
-            qd = round(sum(score.get(ind[0], 0.0) for ind in archive.values()), 1)
+            qd = round(sum(score.get(ind[0], 0.0) for ind in members(archive)), 1)
+            if is_mome(archive):
+                done = [objs[r["gene_id"]] for r in rows if r["generation"] <= g and r["gene_id"] in objs]
+                mo = {"coverage_pct": round(100 * cells / MAP_BINS ** 2, 2),
+                      "archive_genes": len(members(archive)),
+                      "moqd_score": round(sum(hypervolume([objs[i[0]] for i in v if i[0] in objs])
+                                              for v in archive.values()), 1),
+                      "global_hypervolume": round(hypervolume([objs[i[0]] for i in members(archive)
+                                                               if i[0] in objs]), 1),
+                      "max_speed": round(max(s for s, _ in done), 1) if done else "",
+                      "mean_speed": round(float(np.mean([s for s, _ in done])), 1) if done else ""}
         gen_rows.append({
             "generation": g, "evaluated": len(rs), "ok": len(ok),
             "invalid": sum(r["status"] == "invalid" for r in rs),
@@ -140,12 +210,17 @@ def main():
             "best_this_gen": round(max(ok), 1) if ok else "", "best_so_far": round(best, 1),
             "median_ok": round(float(np.median(ok)), 1) if ok else "",
             "archive_cells": cells, "archive_qd_score": qd,
+            **mo,
         })
     with open(f"{args.out}/generations.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(gen_rows[0]))
+        w = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for r in gen_rows for k in r)), restval="")
         w.writeheader()
         w.writerows(gen_rows)
     plot(rows, gen_rows, args, f"{args.out}/fitness_by_generation.png")
+    if objs:
+        plot_pareto(rows, f"{args.out}/pareto_front.png")
+        if archive and is_mome(archive):
+            plot_cells(archive, score, f"{args.out}/foot_contact_map.png")
     for r in gen_rows:
         print(r)
 
@@ -193,6 +268,76 @@ def plot(rows, gen_rows, args, path):
     ax.yaxis.set_major_formatter(matplotlib.ticker.StrMethodFormatter("{x:,.0f}"))
     fig.tight_layout()
     fig.savefig(path, dpi=160)
+
+def _style(ax, muted, grid, bg):
+    ax.set_facecolor(bg)
+    ax.grid(color=grid, lw=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(muted)
+    ax.tick_params(colors=muted)
+
+
+def plot_pareto(rows, path):
+    """Speed vs effort of every trained gene; the Pareto front (no other gene is both
+    faster and cheaper) is drawn as a staircase: each step is the best speed you can
+    get for at most that much effort."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    dot, ink, muted, grid, bg = "#2a78d6", "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
+    pts = [(r["speed"], r["effort"]) for r in rows if r["status"] == "ok" and r.get("speed", "") != ""]
+    front = pareto(pts)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    fig.patch.set_facecolor(bg)
+    ax.scatter([e for _, e in pts], [s for s, _ in pts], s=30, color=dot, alpha=0.4, edgecolor=bg,
+               linewidth=1, zorder=3, label="one gene")
+    xs, ys = [], []
+    for s, e in front:   # sorted by effort; speed rises along the front
+        xs += [e, e]
+        ys += [ys[-1] if ys else 0.0, s]
+    xs.append(max(e for _, e in pts))
+    ys.append(ys[-1])
+    ax.plot(xs[1:], ys[1:], color=ink, lw=2, zorder=4, drawstyle="default", label="Pareto front")
+    ax.scatter([e for _, e in front], [s for s, _ in front], s=60, color=ink, edgecolor=bg, linewidth=2, zorder=5)
+    ax.set_xlabel("Effort (sum of 0.1 x squared motor commands per episode, lower is better)", color=ink)
+    ax.set_ylabel("Speed (sum of forward reward per episode)", color=ink)
+    ax.set_title("Speed vs effort of every trained gene", loc="left", fontsize=12, color=ink)
+    ax.legend(loc="upper left", bbox_to_anchor=(0, -0.14), ncol=2, fontsize=9, frameon=False)
+    _style(ax, muted, grid, bg)
+    ax.yaxis.set_major_formatter(matplotlib.ticker.StrMethodFormatter("{x:,.0f}"))
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+
+
+def plot_cells(archive, score, path):
+    """Best score in each filled foot-contact cell of the final archive."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ink, muted, grid, bg = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
+    grid_vals = np.full((MAP_BINS, MAP_BINS), np.nan)
+    for cell, front in archive.items():
+        vals = [score[i[0]] for i in front if i[0] in score]
+        if vals:
+            grid_vals[cell[1], cell[0]] = max(vals)
+    fig, ax = plt.subplots(figsize=(6.5, 5.5))
+    fig.patch.set_facecolor(bg)
+    im = ax.imshow(grid_vals, origin="lower", extent=(0, 1, 0, 1), cmap="Blues", interpolation="nearest")
+    cb = fig.colorbar(im, ax=ax, fraction=0.046)
+    cb.set_label("Best score in cell", color=ink)
+    ax.set_xlabel("Back foot on the ground (share of steps)", color=ink)
+    ax.set_ylabel("Front foot on the ground (share of steps)", color=ink)
+    ax.set_title(f"Filled cells: {len(archive)} of {MAP_BINS * MAP_BINS}", loc="left", fontsize=12, color=ink)
+    _style(ax, muted, grid, bg)
+    ax.grid(False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+
 
 if __name__ == "__main__":
     main()
