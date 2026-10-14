@@ -242,7 +242,13 @@ mutation_probability = 0.8  # Probability of mutating an individual
 num_elites = 8
 hof_size = 100
 max_gen_attempts = 5
-migration_gen = 5
+#: Generations between island migrations. run_improved.py stops at the next multiple
+#: of it (islands.py then migrates and relaunches); 0 = no migration, run straight to
+#: num_generations (single island, chained controller jobs resume from checkpoints).
+migration_gen = int(os.getenv("LLMGE_MIGRATION_GEN", "5"))
+#: Slurm time limit of each gene's evaluation job, passed as sbatch -t (overrides the
+#: "#SBATCH -t" line of slurm_config.yaml python_bash_script). Empty = keep the yaml's.
+GENE_JOB_TIME = os.getenv("LLMGE_GENE_TIME", "")
 """
 MAP-Elites Constants
 """
@@ -262,6 +268,32 @@ MAP_ELITES_DESCRIPTORS = [
 ]
 #: Results column that ranks occupants competing for the same cell (maximised).
 MAP_ELITES_OBJECTIVE = "mean_reward"
+#: Archive kind, from LLMGE_ARCHIVE:
+#:   "single"  one elite per cell, ranked by MAP_ELITES_OBJECTIVE (every run up to
+#:             xqc_island_run2).
+#:   "mome"    Multi-Objective MAP-Elites (Pierrot et al., 2022): each cell keeps a
+#:             Pareto front over MOME_OBJECTIVES, at most MOME_FRONT_SIZE genes;
+#:             parents are drawn by picking a filled cell uniformly, then a gene of
+#:             its front uniformly. Cells are the foot-contact grid below.
+MAP_ELITES_MODE = os.getenv("LLMGE_ARCHIVE", "single")
+#: Results columns, all maximised: speed (sum of the forward reward per episode) and
+#: minus effort (sum of reward_ctrl = -0.1 * sum of squared actions, <= 0).
+MOME_OBJECTIVES = ["mean_return_forward", "mean_return_ctrl"]
+MOME_FRONT_SIZE = int(os.getenv("LLMGE_MOME_FRONT_SIZE", "4"))
+#: Fixed hypervolume reference point (same for every run, so hypervolume and MOQD
+#: score compare across runs): no forward progress, and the largest possible effort
+#: on HalfCheetah, 0.1 * 6 actuators * 1^2 * 1000 steps = 600.
+MOME_REFERENCE_POINT = (0.0, -600.0)
+if MAP_ELITES_MODE == "mome":
+    #: Same grid as Alex's PGA-ME / LIMEN baselines (compare_baselines.py on
+    #: Mujoco-ME-Base): 32 x 32 over the share of steps each foot touches the ground.
+    MAP_BINS = int(os.getenv("LLMGE_MAP_BINS", "32"))
+    MAP_ELITES_DESCRIPTORS = [
+        ("foot_contact_0", 0.0, 1.0),   # back foot (bfoot)
+        ("foot_contact_1", 0.0, 1.0),   # front foot (ffoot)
+    ]
+elif MAP_ELITES_MODE != "single":
+    raise ValueError(f"LLMGE_ARCHIVE={MAP_ELITES_MODE!r}: expected 'single' or 'mome'")
 #: Sentinel reward that sota/MujocoRL/train_rl.py writes when a generated model
 #: cannot be built, trained or evaluated. Genes at or below it never enter the
 #: archive, so a broken model cannot occupy a niche or be drawn as a parent.

@@ -1,7 +1,7 @@
 """Retrain one LLM-GE XQC gene and record gifs of the trained policy (for presentations).
 
-Evolution does not keep trained weights, so this retrains the gene with the same
-settings as its evaluation (train_xqc_gene.py: same seeds, steps and validation)
+To film a gene that evolution already trained, use render_actor.py (no retraining).
+This script retrains the gene with the same settings as its evaluation (train_xqc_gene.py: same seeds, steps and validation)
 and then saves one deterministic rollout gif per seed. It writes to its own run
 dir and never touches llmge/results, so the evolution's scores stay as they were.
 

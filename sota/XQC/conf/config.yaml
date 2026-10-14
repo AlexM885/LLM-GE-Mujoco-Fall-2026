@@ -33,6 +33,8 @@ resume: auto                  # auto = resume if a checkpoint exists, never = re
 final_descriptors: false      # true = write descriptors.json (MAP-Elites) after max_steps (LLM-GE)
 final_video: ""               # directory: save one deterministic rollout gif per seed after max_steps
 video_steps: 300              # env steps per gif (HalfCheetah: 20 steps/s)
+final_checkpoint: true        # false = no full checkpoint at max_steps (LLM-GE genes: ~100 MB each)
+save_actor: false             # true = write actor.pkl (actor params + batch stats, ~1 MB) at max_steps
 
 wandb:
   project_name: XQC

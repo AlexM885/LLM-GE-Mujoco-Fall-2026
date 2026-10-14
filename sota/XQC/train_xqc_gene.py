@@ -8,11 +8,13 @@ launch it with EVAL_RUNLINE:
 1. Loads llmge/models/network_<gene_id>.py, checks ALGO == "xqc", and validates every
    key of get_architecture_kwargs() | get_xqc_kwargs() against ALLOWED (type + range).
 2. Runs train_xqc.py with those keys as Hydra overrides (num_seeds trained batched,
-   no periodic checkpoints, final_descriptors=true). Its output goes to train.log in
+   no checkpoints, final_descriptors=true, save_actor=true: the trained actors are
+   kept in the run dir as actor.pkl, ~1 MB, so render_actor.py can film any gene). Its output goes to train.log in
    the run dir, so a crash there never prints a traceback into this job's output.
 3. Writes llmge/results/<gene_id>_results.csv with the columns run_improved.py and
    MAP-Elites read:  mean_reward,std_reward,train_time,param_count,mean_distance,
-   mean_control_cost  (+ timesteps,num_seeds at the end; all numeric).
+   mean_control_cost  (+ timesteps,num_seeds, then mean_return_forward,mean_return_ctrl,
+   foot_contact_0,foot_contact_1 from llmge_descriptors.py; all numeric).
    mean_reward = mean over seeds of each seed's 10-episode deterministic return;
    std_reward = std of those per-seed means; param_count = actor parameters.
    Any failure writes the -999999 sentinel row instead, like train_rl.py.
@@ -29,7 +31,8 @@ import importlib.util
 HERE = os.path.dirname(os.path.abspath(__file__))
 LLMGE_DIR = os.path.join(HERE, "llmge")
 # Every column must be numeric: run_improved.py converts the whole row to float.
-HEADER = "mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost,timesteps,num_seeds"
+HEADER = ("mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost,timesteps,num_seeds,"
+          "mean_return_forward,mean_return_ctrl,foot_contact_0,foot_contact_1")
 FAILED = -999999.0
 
 AGENT_KEYS = {
@@ -136,7 +139,8 @@ def main():
     def fail(message):
         train_time = time.time() - start
         stats.update(status="failed", error=message, train_time_sec=train_time, mean_reward=FAILED)
-        write_results(gene_id, [FAILED, 0.0, train_time, 999999999, 0.0, 0.0, args.timesteps, args.num_seeds], stats)
+        write_results(gene_id, [FAILED, 0.0, train_time, 999999999, 0.0, 0.0, args.timesteps, args.num_seeds,
+                                0.0, 0.0, 0.0, 0.0], stats)
         print(f"ERROR evaluating generated model: {message}")
         print(f"Mean reward: {FAILED}, Std: 0.0, Time: {train_time:.1f}s")
         print("Job Done")
@@ -154,7 +158,7 @@ def main():
            f"max_steps={args.timesteps}", f"eval_interval={eval_interval}",
            f"eval_episodes={args.eval_episodes}", f"start_training={min(5000, args.timesteps // 2)}",
            f"run_dir={run_dir}", "checkpoint_interval=0", "save_replay_buffer=false",
-           "final_descriptors=true", "resume=never", *overrides]
+           "final_descriptors=true", "resume=never", "final_checkpoint=false", "save_actor=true", *overrides]
     stats["command"] = " ".join(cmd)
     print("Running:", stats["command"], flush=True)
     log_path = os.path.join(run_dir, "train.log")
@@ -174,10 +178,15 @@ def main():
     std_reward = (sum((r - mean_reward) ** 2 for r in per_seed) / len(per_seed)) ** 0.5
     train_time = time.time() - start
     row = [mean_reward, std_reward, train_time, desc["actor_params"], desc["mean_distance"],
-           desc["mean_control_cost"], args.timesteps, args.num_seeds]
+           desc["mean_control_cost"], args.timesteps, args.num_seeds, desc["mean_return_forward"],
+           desc["mean_return_ctrl"], desc["foot_contact_0"], desc["foot_contact_1"]]
     stats.update(status="ok", train_time_sec=train_time, mean_reward=mean_reward, std_reward=std_reward,
                  per_seed_return=per_seed, param_count=desc["actor_params"],
-                 mean_distance=desc["mean_distance"], mean_control_cost=desc["mean_control_cost"])
+                 mean_distance=desc["mean_distance"], mean_control_cost=desc["mean_control_cost"],
+                 mean_return_forward=desc["mean_return_forward"], mean_return_ctrl=desc["mean_return_ctrl"],
+                 foot_geom_names=desc["foot_geom_names"],
+                 foot_contact=[desc["foot_contact_0"], desc["foot_contact_1"]],
+                 actor=os.path.join(run_dir, "actor.pkl"))
     write_results(gene_id, row, stats)
     print(f"Mean reward: {mean_reward}, Std: {std_reward}, Params: {desc['actor_params']}, "
           f"Distance: {desc['mean_distance']}, CtrlCost: {desc['mean_control_cost']}, Time: {train_time:.1f}s")
