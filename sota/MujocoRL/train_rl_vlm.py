@@ -162,7 +162,14 @@ def main(
     import numpy as np
     from stable_baselines3 import TD3
     from stable_baselines3.common.noise import NormalActionNoise
-    from eval import evaluate_model, make_env, validate_reward_spec
+    # Shazeb's XQC branch has a minimal eval.py (just evaluate_model); the
+    # Walker2d-v5 helpers (make_env, validate_reward_spec, etc.) live in a
+    # sibling module so we can share them without touching his file.
+    try:
+        from eval import evaluate_model, make_env, validate_reward_spec
+    except ImportError:
+        from eval import evaluate_model
+        from vlm_eval_helpers import make_env, validate_reward_spec
     from train_rl import write_failure_results
 
     start_time = time.time()

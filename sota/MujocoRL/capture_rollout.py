@@ -293,8 +293,15 @@ def main():
 
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from eval import (make_env, validate_reward_spec, get_foot_geom_ids,
-                      _feet_in_contact, _get_x_position)
+    # Shazeb's XQC branch has a minimal eval.py; the fuller helper set
+    # lives in vlm_eval_helpers.py when running on this branch.
+    try:
+        from eval import (make_env, validate_reward_spec, get_foot_geom_ids,
+                          _feet_in_contact, _get_x_position)
+    except ImportError:
+        from vlm_eval_helpers import (make_env, validate_reward_spec,
+                                      get_foot_geom_ids, _feet_in_contact,
+                                      _get_x_position)
     from stable_baselines3 import PPO, TD3
 
     if not os.path.isfile(args.model):
