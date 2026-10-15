@@ -1,0 +1,126 @@
+<<ROLE_PREAMBLE>>
+
+You are producing a short auxiliary reward function that will shape the
+training reward of a HalfCheetah-v4 policy during TD3 learning. The
+policy's EVALUATION reward is unchanged: the auxiliary term can only
+accelerate or guide learning, never inflate the reported fitness. Your
+output will be executed inside a strict sandbox (whitelisted numpy +
+arithmetic only).
+
+HalfCheetah-v4 observation (17 floats, deterministic indices):
+  obs[0]   z-coordinate of front tip (height; nominally ~0 at rest)
+  obs[1]   angle of front tip (body pitch)
+  obs[2]   angle of second rotor (back thigh)
+  obs[3]   angle of third rotor (back shin)
+  obs[4]   angle of fourth rotor (back foot)
+  obs[5]   angle of fifth rotor (front thigh)
+  obs[6]   angle of sixth rotor (front shin)
+  obs[7]   angle of seventh rotor (front foot)
+  obs[8]   x-velocity of front tip (FORWARD VELOCITY — base reward tracks this)
+  obs[9]   z-velocity (vertical)
+  obs[10]  angular velocity of front tip (body pitch rate)
+  obs[11:14] angular velocities of back-leg rotors (thigh, shin, foot)
+  obs[14:17] angular velocities of front-leg rotors (thigh, shin, foot)
+
+Action (6 floats, each in [-1, 1]):
+  action[0:3] back-leg torques (thigh, shin, foot)
+  action[3:6] front-leg torques (thigh, shin, foot)
+
+info dict available each step:
+  info["reward_forward"]  per-step forward velocity reward
+  info["reward_ctrl"]     per-step torque cost (negative)
+  info["x_position"]      current torso x position
+  info["x_velocity"]      forward velocity (same as obs[8])
+
+Base HalfCheetah reward already contains forward velocity minus 0.1 *
+squared torque. Your aux_reward should contribute a DIFFERENT,
+orthogonal signal that the base reward does NOT already encode --- e.g.
+gait regularity, body-pitch stability, inter-leg coordination,
+back-vs-front leg balance, stride period, posture smoothness,
+energy-per-distance. Do NOT duplicate the base reward (forward velocity
+or torque cost).
+
+STRONG PREFERENCE: write the aux_reward as a BONUS (positive values when
+the policy is doing the right thing), not a PENALTY (negative values
+scaled by the degree of a failure). A pure penalty like
+``-float(np.square(obs[10]))`` creates a local optimum where the policy
+can minimise the penalty by not moving --- we have measured this failure
+mode on Walker2d-v5 TD3 under this exact setup. A bounded bonus like
+``float(np.exp(-np.square(obs[10])))`` (which is 1 when the pitch rate
+is zero and decays smoothly as it grows) has the same shaping gradient
+at small values of the quantity being shaped, but is never worse than
+returning zero, so it cannot create a stand-still trap. When in doubt,
+convert ``-f(x)`` into ``np.exp(-f(x))`` or a clipped
+``max(0.0, 1.0 - f(x))`` form.
+
+GENERATION CONTEXT
+<<GEN_CONTEXT>>
+
+PARENT BEHAVIOUR CONTRAST
+Top-performing parents in this generation:
+<<TOP_PARENTS>>
+
+Bottom-performing parents in this generation:
+<<BOTTOM_PARENTS>>
+
+<<REFLECTION_BLOCK>>
+
+SANDBOX RULES (strict; snippet is rejected on any violation)
+- Exactly one top-level function with the signature
+    def aux_reward(obs, action, info):
+- You may use: ``np`` (numpy) with any of
+    np.sum, np.mean, np.abs, np.sqrt, np.square, np.clip, np.maximum,
+    np.minimum, np.where, np.sign, np.exp, np.log, np.log1p, np.tanh,
+    np.sin, np.cos, np.hypot, np.power, np.dot, np.linalg.norm, np.pi,
+    np.float32, np.float64, np.negative, np.prod
+  plus the builtins abs, float, int, len, min, max, range, sum.
+- No imports, no exec/eval, no file I/O, no attribute access except on np,
+  no dunder names, no classes, no nested functions, no lambdas, no loops,
+  no comprehensions, no with/try/raise/assert, no yield/await, no delete.
+- Must contain an explicit ``return <float>``.
+- Keep the function short: usually 1--6 lines of body is enough.
+- The return value is clipped into [-10, 10] by the sandbox, so lam is
+  the only knob that controls the shaping magnitude.
+
+FEW-SHOT LIBRARY (diverse BONUS-form patterns; prefer this shape)
+Example A (back-vs-front leg symmetry bonus; peaks when leg angles mirror):
+    def aux_reward(obs, action, info):
+        asym = float(np.sum(np.abs(obs[2:5] - obs[5:8])))
+        return float(np.exp(-asym))
+
+Example B (pitch-stability bonus; peaks when body is level and still):
+    def aux_reward(obs, action, info):
+        return float(np.exp(-np.square(obs[10])))
+
+Example C (energetic efficiency bonus; rewards forward velocity per unit torque):
+    def aux_reward(obs, action, info):
+        effort = float(np.sum(np.square(action))) + 1e-3
+        return float(max(0.0, obs[8])) / effort
+
+Example D (stride-rhythm bonus; peaks when back and front legs alternate):
+    def aux_reward(obs, action, info):
+        back_rhy = float(np.sum(obs[11:14]))
+        front_rhy = float(np.sum(obs[14:17]))
+        return float(np.exp(-np.square(back_rhy + front_rhy)))
+
+Example E (joint-velocity smoothness bonus; peaks when all joint velocities small):
+    def aux_reward(obs, action, info):
+        jv = float(np.sum(np.square(obs[11:17])))
+        return float(np.exp(-0.1 * jv))
+
+All five examples are BONUSES in [0, 1]. Note the pattern: identify the
+quantity you want shaped, write it so zero deviation gives the maximum
+value, and use ``np.exp(-...)`` or ``max(0, 1-...)`` to make it a
+non-negative shaping term with the same local gradient as the equivalent
+penalty but without the stand-still trap. Pick a signal the parent
+contrast says the bottom parents are failing on.
+
+OUTPUT FORMAT (strict JSON, no prose outside the JSON object)
+{
+  "aux_reward_code": "def aux_reward(obs, action, info):\n    ...\n    return <float>\n",
+  "lam": <float in [0.01, 1.0]>,
+  "anneal_steps": <int, 0 for no anneal, else fraction of training to decay over>,
+  "rationale": "<2-3 sentences: what failure mode in the bottom parents your snippet targets, why your bonus-form avoids the stand-still trap, and why it is orthogonal to the base reward>"
+}
+
+Return nothing else.
