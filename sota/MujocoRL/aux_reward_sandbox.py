@@ -327,5 +327,14 @@ def safe_call(
         value = 0.0
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old_handler)
+        # Mask SIGALRM before restoring the original handler. If the alarm
+        # fired just as we're exiting, _raise_timeout could re-trigger inside
+        # signal.signal() and leak _TimeoutSignal past this `finally`. Setting
+        # SIG_IGN first guarantees any pending delivery is dropped. Wrap the
+        # restore itself in a try/except as a belt-and-braces defence.
+        try:
+            signal.signal(signal.SIGALRM, signal.SIG_IGN)
+            signal.signal(signal.SIGALRM, old_handler)
+        except _TimeoutSignal:
+            pass
     return _clip_result(value, clip)
