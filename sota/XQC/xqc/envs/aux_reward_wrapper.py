@@ -111,9 +111,12 @@ class AuxRewardWrapper(gym.Wrapper):
         obs, reward, terminated, truncated, info = self.env.step(action)
         lam = self.lam
         if lam != 0.0:
-            phi = safe_call(
-                self.aux_fn, obs, action, info,
-                timeout_sec=self.timeout_sec, clip=self.clip)
+            try:
+                phi = safe_call(
+                    self.aux_fn, obs, action, info,
+                    timeout_sec=self.timeout_sec, clip=self.clip)
+            except Exception:
+                phi = 0.0
             # Audit uses the raw Phi(s') so aux_mean is a diagnostic for prompt
             # tuning; the shaping term applied to the reward is PBRS-wrapped
             # and/or centered when enabled.
