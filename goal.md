@@ -78,3 +78,21 @@ Specifically the following are ported verbatim (119 unit tests passing):
 | 2026-10-15T22:10 | XQC pilot partial, 50k paired-seed is NULL | XQC_control (6285256) was shrunk to 1h by scontrol (MaxGRESRunMinsPerUser) and TIMEOUT'd at 275k steps on L40S (mean 10208). XQC_vlm (6285258) is still running on a slower V100-16GB; made it to 50k steps (mean 6175). VLM emitted `exp(-0.1 * sum(obs[11:17]^2))` λ=0.1 — a joint-velocity smoothness bonus; shaping magnitude is near zero at HC running speed. Paired-seed 50k: diff mean +11.8 (95% CI [-628, +724]), d=+0.01, IQM −315, P(VLM>ctrl)=0.40 — **null result**. The pilot shows the pipeline runs end-to-end on Shazeb's XQC+JAX training loop, but this specific aux function + λ is too conservative to move the needle at 50k. Longer horizons needed, and/or a less conservative VLM prompt. |
 | 2026-10-15T09:30 | XQC pipeline embedded + HC-TD3 pilot launched | Patched `sota/XQC/xqc/envs/envs.py` so Shazeb's `make_env` applies `AuxRewardWrapper` whenever `LLMGE_AUX_REWARD_CACHE` is set in the environment. All six aux-related env vars (CACHE/LAM/ANNEAL/CENTER/PBRS/PBRS_GAMMA) are honoured. Copied the sandbox and wrapper verbatim into `sota/XQC/xqc/envs/` (Py3.9-safe via `from __future__ import annotations`). Running `train_gene_xqc.py` with the env var set now routes the shaped reward through XQC's whole JAX training loop without touching the agent or Hydra config. Submitted jobs 6285046 (HC-v4 TD3 capture-train), 6285047 (capture_rollout), 6285048 (Gemma 3 12B IT aux emit with HC-v2-bonus prompt), 6285050 (hc_control × 10 seeds). HC VLM arm (6285048-dependency) deferred — hit 50/50 queue cap; submitted after Walker2d drains. Also kicked off `sota/XQC/pace/install_env.sh` as job 6285053 (CPU-only JAX; GPU build also possible) so the XQC venv at `/storage/ice1/5/8/nsani3/xqc-baseline/` is ready when we scale to real XQC runs on HalfCheetah. |
 | 2026-10-15T07:30 | branch created | Off `origin/shazeb/halfcheetah-xqc` (sha 764e63dbe). VLM infra ported from `neel/vlm-on-me-base` c-committed sha a8d2af848. 119 unit tests passing locally. emit.txt rewritten for HalfCheetah obs layout. train_rl_vlm.py default env flipped to HalfCheetah-v4. Pilot sbatch now takes `PILOT_ENV` so the same scripts can target either env. HF cache (Gemma 3 12B IT, 35 GB) already populated on PACE scratch from Walker2d run — reused as-is. |
+## 2026-10-16 autonomous: multi-gen chain launched
+
+Captures from gen-1 500k winners now produced via JAX actor-rollout (sota/XQC/capture_xqc_rollout.py).
+Verified end-to-end on PACE after two signature fixes (XQCLearner needs updates_per_step +
+num_interactions; manifest/telemetry adapted to SB3 capture_rollout format so
+load_capture() picks them up by gene_id).
+
+Capture outputs:
+  - captures/gen1_vlm_lam10_500k_a: 16 frames, ep0 return 5710.8 (truncated 500-step rollout)
+  - captures/gen1_control_500k_a:  16 frames, ep0 return 5385.3  (truncated 500-step rollout)
+
+Gen-2 pipeline (currently queued on PACE):
+  - 6306093 (pending): Gemma 3 12B IT emit, with gen-1 cache attached as reflection,
+    top=VLM 500k arm, bottom=control 500k arm, fitness map {VLM:11417, control:11096}.
+    Temp=0.7, top_p=0.95, seed=42.
+  - launch_gen2_training.sh (ready): submits 4 arms (VLM A/B + control A/B) at 100k
+    with the new aux cache; N=10 inner parallel seeds → N=20 pooled paired-seed CRN.
+
