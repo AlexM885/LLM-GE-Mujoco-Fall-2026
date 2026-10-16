@@ -69,12 +69,20 @@ def build_agent_from_run_dir(run_dir, env_name):
 
     num_seeds = int(cfg.get("num_seeds", 10))
     seed = int(cfg.get("seed", 0))
+    updates_per_step = int(cfg.get("updates_per_step", 2))
+    action_repeat = int(cfg.env.get("action_repeat", 1))
+    num_interactions = int(cfg.get("max_steps", 1_000_000)) // max(action_repeat, 1)
 
-    # Instantiate the learner with the same shape as training; we won't call
-    # update() so critic/temperature/buffer configs only need to type-check.
-    agent = XQCLearner(
-        seed, obs_space.sample()[None], act_space.sample()[None],
-        num_seeds=num_seeds, **OmegaConf.to_container(cfg.agent, resolve=True))
+    agent_kwargs = OmegaConf.to_container(cfg.agent, resolve=True)
+    agent_kwargs.update({
+        "seed": seed,
+        "num_seeds": num_seeds,
+        "updates_per_step": updates_per_step,
+        "num_interactions": num_interactions,
+        "observations": obs_space.sample()[None],
+        "actions": act_space.sample()[None],
+    })
+    agent = XQCLearner(**agent_kwargs)
 
     # Find latest checkpoint and load its agent-state leaves.
     ckpt_dir = xqc_ckpt.find_latest(run_dir)
@@ -266,10 +274,11 @@ def main():
     if args.seed_index < 0 or args.seed_index >= num_seeds:
         raise ValueError(f"--seed-index {args.seed_index} out of range for num_seeds={num_seeds}")
 
-    telemetry = {"episodes": [], "frame_manifest": [], "env": args.env,
+    telemetry = {"episodes": [], "frames": [], "env": args.env,
                  "source": "capture_xqc_rollout.py", "seed_index": args.seed_index,
-                 "run_dir": str(run_dir)}
+                 "run_dir": str(run_dir), "series": {}}
 
+    order = 0
     for ep in range(args.episodes):
         reset_seed = args.base_reset_seed + ep
         frames, summary, series = rollout_single_seed(
@@ -277,21 +286,35 @@ def main():
             args.max_steps, args.render_stride, args.max_side,
             args.start_n, args.end_n)
         telemetry["episodes"].append(summary)
-        telemetry.setdefault("series", {})[str(ep)] = series
+        telemetry["series"][str(ep)] = series
         for step, frame in frames:
-            name = f"ep{ep:02d}_step{step:05d}.png"
+            name = f"frame_{order:04d}.png"
             imageio.imwrite(str(frames_dir / name), frame)
-            telemetry["frame_manifest"].append({
-                "episode": ep, "step": int(step),
+            telemetry["frames"].append({
+                "index": order, "episode": ep, "step": int(step),
                 "file": f"frames/{name}",
             })
+            order += 1
         print(f"[capture] ep={ep} seed_index={args.seed_index} "
               f"return={summary['return']:.1f} steps={summary['steps']} "
               f"saved {len(frames)} frames", flush=True)
 
     with open(out_dir / "telemetry.json", "w", encoding="utf-8") as f:
         json.dump(telemetry, f, indent=2)
-    print(f"[capture] wrote {len(telemetry['frame_manifest'])} frames + telemetry.json to {out_dir}",
+    manifest = {
+        "gene_id": out_dir.name,
+        "env": args.env,
+        "source": "capture_xqc_rollout.py",
+        "run_dir": str(run_dir),
+        "seed_index": args.seed_index,
+        "episodes": args.episodes,
+        "max_steps": args.max_steps,
+        "num_frames": len(telemetry["frames"]),
+        "frame_index": telemetry["frames"],
+    }
+    with open(out_dir / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"[capture] wrote {len(telemetry['frames'])} frames + telemetry.json + manifest.json to {out_dir}",
           flush=True)
 
 
