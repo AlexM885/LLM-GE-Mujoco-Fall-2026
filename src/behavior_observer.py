@@ -391,9 +391,26 @@ class HFObserver:
         if images:
             processor_kwargs["images"] = images
         inputs = self.processor(**processor_kwargs).to(self.model.device)
+        import os as _os
+        _temp = float(_os.environ.get("VLM_OBSERVER_TEMPERATURE", "0") or 0)
+        _top_p = float(_os.environ.get("VLM_OBSERVER_TOP_P", "1.0") or 1.0)
+        _seed = _os.environ.get("VLM_OBSERVER_SEED")
+        gen_kwargs = dict(max_new_tokens=self.max_new_tokens)
+        if _temp > 0:
+            gen_kwargs["do_sample"] = True
+            gen_kwargs["temperature"] = _temp
+            gen_kwargs["top_p"] = _top_p
+            if _seed is not None:
+                try:
+                    self.torch.manual_seed(int(_seed))
+                    if self.torch.cuda.is_available():
+                        self.torch.cuda.manual_seed_all(int(_seed))
+                except (TypeError, ValueError):
+                    pass
+        else:
+            gen_kwargs["do_sample"] = False
         with self.torch.inference_mode():
-            generated = self.model.generate(
-                **inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+            generated = self.model.generate(**inputs, **gen_kwargs)
         trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated)]
         return self.processor.batch_decode(trimmed, skip_special_tokens=True)[0]
 

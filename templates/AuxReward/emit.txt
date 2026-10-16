@@ -53,6 +53,33 @@ returning zero, so it cannot create a stand-still trap. When in doubt,
 convert ``-f(x)`` into ``np.exp(-f(x))`` or a clipped
 ``max(0.0, 1.0 - f(x))`` form.
 
+AUX INGREDIENT GUIDANCE (critical for HalfCheetah-v4 specifically)
+
+Avoid these failure patterns that we have measured as NEUTRAL or
+COUNTERPRODUCTIVE on HalfCheetah-v4 XQC at N=20 paired seeds:
+- ``exp(-sum(obs[11:17]**2))`` (joint-velocity smoothness) — hurts because
+  fast running on HC REQUIRES large joint velocities.
+- ``exp(-sum|obs[2:5] - obs[5:8]|)`` (back-vs-front leg symmetry) —
+  neutral because HC's natural fast gait is already approximately
+  symmetric; this bonus adds no useful gradient.
+- Any penalty-form (``-f(x)``) — see stand-still trap note above.
+
+Prefer these ingredient families instead:
+- Forward progress Φ(s), e.g.
+    def aux_reward(obs, action, info):
+        v = float(info["x_velocity"])
+        return float(np.tanh(v / 4.0))
+  — a saturating forward-velocity bonus, bounded in [-1, 1]. Under
+  centering + PBRS wrapping this becomes γ·Φ(s')−Φ(s) which is a credit-
+  assignment signal aligned with the base reward (Ng, Harada, Russell
+  1999 Theorem 1: this preserves the optimal policy).
+- Stride-rhythm bonus: reward out-of-phase back/front leg rotor-foot
+  angle, e.g. ``np.sin(obs[4] - obs[7])``, which encodes the alternating
+  leg phase of a running gait.
+- Height-stability bonus bounded by exp(-|obs[0]|): rewards keeping the
+  torso near its rest height while running (not standing still, because
+  the base reward dominates there).
+
 GENERATION CONTEXT
 <<GEN_CONTEXT>>
 
