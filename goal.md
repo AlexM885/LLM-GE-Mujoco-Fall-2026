@@ -116,3 +116,41 @@ override LLMGE_AUX_REWARD_LAM=10 (preserving the gen-1 working lambda).
 - 6306370 xqc_control_gen2_a (seed=0, no aux)
 - 6306371 xqc_control_gen2_b (seed=1, no aux)
 
+
+## 2026-10-16 23:00 — GEN-2 MULTI-GEN RESULTS LANDED
+
+**Pipeline executed end-to-end for the first time:**
+
+1. Captured gen-1 500k winner (VLM arm) + control via JAX actor-rollout
+   (sota/XQC/capture_xqc_rollout.py). 16 frames per arm, SB3-compat manifest.
+2. Gemma 3 12B IT re-observed with gen-1 cache as reflection input.
+   Output: `return float(np.tanh(info["x_velocity"] / 4.0))` — IDENTICAL formula.
+3. Trained 4 gen-2 arms (VLM A/B + control A/B) at 100k, N=10 inner seeds, 2 outer.
+
+**Gen-2 paired-seed CRN (N=19 pooled, matched outer+inner seeds):**
+
+```
+  step   vlm_mean   ctl_mean    diff      d       CI_lo   CI_hi   wins
+ 25000     7824       4995    +2829   +3.40     +2484   +3214   19/19
+ 50000     8549       6638    +1911   +1.52     +1377   +2481   19/19
+ 75000     8913       7307    +1607   +1.13      +993   +2232   16/19
+100000     9055       8023    +1032   +0.58      +268   +1820   14/19
+```
+
+**Compare to gen-1 N=30 at 100k horizon:**
+- Gen 1 25k: d=+3.61, 30/30
+- Gen 2 25k: d=+3.40, 19/19  ← reproduced
+- Gen 1 100k: d=+0.44
+- Gen 2 100k: d=+0.58  ← reproduced
+
+**Research findings this gives us:**
+1. **Operator stability**: Gemma's aux_reward formula is self-consistent across
+   generations even with reflection input + temperature=0.7 sampling. The
+   fwd-velocity signal is a strong attractor for the VLM, not a lucky seed.
+2. **Lift reproduces**: The aux reward's effect is replicated when the pipeline
+   is run end-to-end from a different gen's rollouts, not just the same cache.
+3. **Lambda attractor**: Gemma persistently resets lambda to ~0.1 across
+   generations; the strong-signal lambda=10 must be preserved externally.
+   This is a bug in the VLM-authoring layer, not the aux itself.
+
+Multi-gen chain unblocked. Can now extend to gen-3+ when needed.
