@@ -18,10 +18,12 @@
 # server, so a queued or restarting server never makes gene creation fail.
 # SERVER_JOBS=0 with LLMGE_AFTER_SERVER=<job id> chains only controllers, starting
 # after that (already queued) server job.
+# LLMGE_EXCLUDE_NODES=node1,node2 keeps every job off those nodes (bad GPUs: on
+# Oct 17 atl1-1-03-014-16-0 failed CUDA init and 14 chained servers died on it).
 set -euo pipefail
 cd "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 
-[ $# -ge 3 ] || { sed -n '2,20p' "$0"; exit 1; }
+[ $# -ge 3 ] || { sed -n '2,22p' "$0"; exit 1; }
 RUN="$1"; SERVERS="$2"; CONTROLLERS="$3"; CTIME="${4:-18:00:00}"
 [[ "$RUN" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "bad run name: $RUN" >&2; exit 1; }
 [ "${LLMGE_MIGRATION_GEN:-5}" = 0 ] || echo "WARNING: LLMGE_MIGRATION_GEN=${LLMGE_MIGRATION_GEN:-5} (unset = 5): each controller stops at the next multiple of it" >&2
@@ -35,7 +37,7 @@ chain() {  # chain <count> <first job's dependency or ""> <sbatch args...>; prin
         local dep=()
         if [ -n "$prev" ]; then dep=(--dependency="afterany:$prev")
         elif [ -n "$first" ]; then dep=(--dependency="$first"); fi
-        id=$(sbatch --parsable "${dep[@]}" "${@:3}")
+        id=$(sbatch --parsable ${LLMGE_EXCLUDE_NODES:+--exclude="$LLMGE_EXCLUDE_NODES"} "${dep[@]}" "${@:3}")
         prev="${id%%;*}"
         echo "$prev"
     done

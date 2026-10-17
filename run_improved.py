@@ -257,8 +257,8 @@ def wait_for_llm_server(timeout=3600, check_interval=10):
 
     if not LOCAL_LLM:
         return True
-    if LLM_SERVER_READY:
-        return True
+    # Checked before every LLM job, not just once: a server job can end or crash
+    # (e.g. a bad GPU node) mid-run, and LLM jobs sent with no server all fail.
 
     env_timeout = os.getenv("LLM_SERVER_READY_TIMEOUT")
     env_interval = os.getenv("LLM_SERVER_READY_CHECK_INTERVAL")
@@ -284,14 +284,16 @@ def wait_for_llm_server(timeout=3600, check_interval=10):
             try:
                 with urllib.request.urlopen(server_url, timeout=5) as response:
                     if 200 <= response.status < 300:
+                        if not LLM_SERVER_READY:
+                            print(f"\t☑ LLM server is ready at {server_url}", flush=True)
                         LLM_SERVER_READY = True
-                        print(f"\t☑ LLM server is ready at {server_url}", flush=True)
                         return True
             except urllib.error.URLError as err:
                 last_error = err
             except TimeoutError as err:
                 last_error = err
 
+        LLM_SERVER_READY = False
         elapsed = round(time.time() - start_time)
         print(
             f"\t‣ Waiting for LLM server readiness ({elapsed}s/{timeout}s). "
