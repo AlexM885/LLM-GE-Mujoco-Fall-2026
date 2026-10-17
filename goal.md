@@ -96,3 +96,23 @@ Gen-2 pipeline (currently queued on PACE):
   - launch_gen2_training.sh (ready): submits 4 arms (VLM A/B + control A/B) at 100k
     with the new aux cache; N=10 inner parallel seeds → N=20 pooled paired-seed CRN.
 
+
+### Gen-2 aux emitted (6306093)
+
+Gemma 3 12B IT (temp=0.7, top_p=0.95) with gen-1 cache attached as reflection:
+- aux_reward_code: `return float(np.tanh(info['x_velocity']/4.0))` — IDENTICAL formula
+- lam=0.1 — Gemma reset to timid lambda (same attractor seen in gen-1 reflection)
+- validation=ok, fallback_reason=None
+
+Interpretation: Gemma is self-consistent on the aux formula across generations
+even with reflection + temperature sampling, but has a persistent attractor
+toward low lambda. Multi-gen's main finding so far: the aux is robust to
+VLM resampling, lambda is not. The gen-2 run uses the emitted code with env
+override LLMGE_AUX_REWARD_LAM=10 (preserving the gen-1 working lambda).
+
+### Gen-2 training launched (4 arms, 100k)
+- 6306368 xqc_vlm_gen2_a (seed=0, λ=10, gen-2 cache)
+- 6306369 xqc_vlm_gen2_b (seed=1, λ=10, gen-2 cache)
+- 6306370 xqc_control_gen2_a (seed=0, no aux)
+- 6306371 xqc_control_gen2_b (seed=1, no aux)
+
