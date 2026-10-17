@@ -1,0 +1,29 @@
+{
+  "anneal_steps": 0,
+  "archive_coverage": 85,
+  "attempts": 1,
+  "aux_reward_code": "def aux_reward(obs, action, info):\n    v = float(info[\"x_velocity\"])\n    return float(np.tanh(v / 4.0))\n",
+  "best_so_far": 9039.0,
+  "created_at": "2026-10-17T07:39:23.128603+00:00",
+  "duration_sec": 235.558,
+  "fallback_reason": null,
+  "generation": 3,
+  "lam": 0.1,
+  "model_id": "google/gemma-3-12b-it",
+  "model_revision": "main",
+  "parent_hashes": [],
+  "parent_set": {
+    "bottom": [
+      "xqc_control_gen2_a"
+    ],
+    "top": [
+      "xqc_vlm_gen2_a"
+    ]
+  },
+  "prompt_hash": "4f642da3880d4168570d2b5575ae957b3a63d11227c4b97f104bc4821277a3a8",
+  "prompt_revision": "v1",
+  "rationale": "The bottom-performing parents exhibited inconsistent forward velocity. This bonus rewards forward velocity using a hyperbolic tangent function, saturating at +/- 1. This encourages consistent high velocity without penalizing torque and is orthogonal to the base reward's forward velocity component.",
+  "raw_response": "```json\n{\n  \"aux_reward_code\": \"def aux_reward(obs, action, info):\\n    v = float(info[\\\"x_velocity\\\"])\\n    return float(np.tanh(v / 4.0))\",\n  \"lam\": 0.1,\n  \"anneal_steps\": 0,\n  \"rationale\": \"The bottom-performing parents exhibited inconsistent forward velocity. This bonus rewards forward velocity using a hyperbolic tangent function, saturating at +/- 1. This encourages consistent high velocity without penalizing torque and is orthogonal to the base reward's forward velocity component.\"\n}\n```",
+  "schema": "aux-reward-cache-v1",
+  "validation": "ok"
+}
