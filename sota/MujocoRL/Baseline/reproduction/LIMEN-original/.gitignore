@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Experiment outputs
+runs/
+results/
+media/videos/
+*.gif
+*.mp4
+!docs/teaser.mp4
+*.log
+wandb/
+
+# Large data files
+*.pkl
+*.pt
+*.ckpt

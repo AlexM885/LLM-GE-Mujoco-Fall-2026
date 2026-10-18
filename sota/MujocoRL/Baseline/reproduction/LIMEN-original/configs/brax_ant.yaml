@@ -1,0 +1,97 @@
+max_iterations: 5
+candidates_per_iteration: 1
+checkpoint_interval: 1
+log_level: "INFO"
+random_seed: 42
+
+environment:
+  env_id: "ant"
+  adapter_type: "brax"
+  context_file: "contexts/brax_ant.md"
+
+training:
+  # Brax PPO parallelism
+  num_envs: 2048
+  num_minibatches: 32
+
+  # Cascade timesteps
+  total_timesteps: 5000000         # 5M for short training
+  total_timesteps_full: 10000000   # 10M for full training
+  num_seeds: 5
+
+  # PPO hyperparams
+  lr: 0.0003
+  gamma: 0.97
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 1.0
+
+  # Evaluation
+  eval_episodes: 20
+  eval_episodes_for_fitness: 20
+  seed: 42
+
+  # Brax-specific
+  brax_policy_layers: [64, 64]
+  brax_value_layers: [64, 64]
+  brax_episode_length: 1000
+  brax_unroll_length: 5
+  brax_updates_per_batch: 4
+  brax_batch_size: 1024
+  brax_num_evals: 10
+
+interface:
+  max_obs_dim: 512
+
+crash_filter:
+  stage0_timeout: 5
+  stage1_timeout: 10
+  stage2_timeout: 60
+  retry_on_crash: true
+  max_crash_retries: 1
+
+evaluator:
+  timeout: 1800
+  max_retries: 2
+  cascade_evaluation: false
+
+llm:
+  api_base: "https://openrouter.ai/api/v1"
+  model_name: "anthropic/claude-sonnet-4"
+  temperature: 0.7
+  max_tokens: 128000
+  retries: 3
+  retry_delay: 1.0
+
+database:
+  population_size: 40
+  archive_size: 20
+  num_islands: 2
+  feature_dimensions: ["reward_complexity", "obs_dimensionality"]
+  feature_bins: 3
+  migration_interval: 5
+  migration_rate: 0.2
+  exploitation_ratio: 0.75
+  exploration_ratio: 0.15
+
+prompt:
+  num_top_programs: 3
+  num_diverse_programs: 2
+  num_failure_examples: 2
+  include_artifacts: true
+  max_artifact_bytes: 20480
+
+evolution_trace:
+  enabled: true
+  include_code: true
+  include_prompts: true
+  buffer_size: 1
+
+task_description: >
+  Make the ant run forward (+x direction) as fast as possible.
+  Fitness is measured by total forward displacement (cur_x - prev_x)
+  summed over the episode. The ant has 4 legs with 2 joints each
+  (8 actuators total). Design a reward that maximizes forward velocity
+  while maintaining stability.

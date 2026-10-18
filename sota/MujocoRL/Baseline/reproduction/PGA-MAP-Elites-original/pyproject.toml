@@ -1,0 +1,22 @@
+# Environment for running the original PGA-MAP-Elites code unchanged.
+# Versions follow requirements.txt and the paper's README (torch 1.7.1, numpy 1.19.5,
+# gym 0.15.4, pybullet 3.0.8, QDgym). Python 3.8 is the newest these all support.
+# scikit-learn 0.24.2 replaces 0.21.3, which has no Python 3.8 build; it is only
+# used to read the cached CVT centroids and for the nearest-niche lookup.
+[project]
+name = "pga-map-elites-original"
+version = "0.0.0"
+requires-python = ">=3.8,<3.9"
+dependencies = [
+    "torch==1.7.1",
+    "numpy==1.19.5",
+    "gym==0.15.4",
+    "pybullet==3.0.8",
+    "scikit-learn==0.24.2",
+    "cloudpickle",
+    "joblib",
+    "QDgym @ git+https://github.com/ollenilsson19/QDgym.git",
+]
+
+[tool.uv]
+package = false

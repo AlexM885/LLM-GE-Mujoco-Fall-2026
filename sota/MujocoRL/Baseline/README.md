@@ -103,6 +103,67 @@ python sota/MujocoRL/Baseline/compare_baselines.py \
 
 This cuts LIMEN at the given number of training steps, takes the PGA-MAP-Elites archive snapshot closest to it, and places every solution on the 32×32 foot-contact grid the way `run_improved.py` does. It prints best fitness, coverage and QD-score. QD-score is the sum of the best fitness in each filled cell, with no offset, which is the `QD-score(raw)` LLM-GE prints. If the PGA-MAP-Elites run has finished, it also prints a row for the final archive re-evaluated over 10 episodes.
 
+## Reproducing the original papers
+
+`reproduction/` checks that the two baselines work as published, before they were adapted, and that LLM-GE's best result holds up when trained again.
+
+| Folder or file | What it is |
+|---|---|
+| `reproduction/PGA-MAP-Elites-original/` | The authors' code, unchanged, plus a `pyproject.toml` with the paper's pinned versions (Python 3.8, torch 1.7.1, gym 0.15.4, pybullet 3.0.8, QDgym). `paper_results/` holds the paper's reported numbers and curves. |
+| `reproduction/LIMEN-original/` | The authors' code, unchanged except for a client for the LLM-GE model server in `limen/llm_client.py` and `limen/config.py`. |
+| `reproduction/retrain.py` | Trains one network file exactly as LLM-GE trains a gene, with the output kept separate. |
+| `reproduction/slurm/` | The job scripts below. |
+
+All output goes under `baseline_runs/reproduction/`.
+
+### Original PGA-MAP-Elites on QDWalker
+
+```bash
+sbatch sota/MujocoRL/Baseline/reproduction/slurm/pga_original.sh [SEED]
+```
+
+This runs the paper's own task (`QDWalker2DBulletEnv-v0`, PyBullet) with the paper's own config. The paper runs 1,000,000 evaluations, which does not fit in one 8-hour job, and the original code has no resume. The progress file is written after every batch of 100 evaluations, so compare whatever was reached against the paper's curves at the same number of evaluations.
+
+The paper's medians over 20 runs at 1,000,000 evaluations (`paper_results/progress_medians_*.md`):
+
+| Max fitness | QD-score | Coverage (of 1024) |
+|---|---|---|
+| 2729.8 | 1,540,100 | 1022 |
+
+Read off the paper's curves (`paper_results/progress_all.pdf`), roughly: coverage is near 1000 by 50,000 evaluations; max fitness is about 1000 at 100,000, 2000 at 250,000 and 2400 at 500,000; QD-score is about 0.3 million at 100,000 and 1.2 million at 500,000.
+
+The progress file's columns are: evaluations, coverage, max fitness, QD-score, mean, median, 5th and 95th percentile fitness, then the 10-episode re-evaluation of the best.
+
+### Original LIMEN on its own tasks
+
+```bash
+sbatch server.sh
+sbatch sota/MujocoRL/Baseline/reproduction/slurm/limen_original.sh easy
+```
+
+The task is one of `easy`, `medium`, `hard` (XLand-MiniGrid) or `panda`, `go1` (MuJoCo Playground). Each run uses the task's own config and the paper's 30 iterations. The paper's results with Claude Sonnet 4.6:
+
+| Task | Best success rate during evolution | Paper's run time |
+|---|---|---|
+| Easy | 99% | 0.43 h |
+| Medium | 97% | 1.05 h |
+| Hard | 76% | 0.82 h |
+| Panda | 67% | 3.57 h |
+| Go1 | 55% | 5.56 h |
+
+By default this uses the LLM-GE server (Llama 3.3 70B), not Claude Sonnet 4.6. A lower score than the paper's can therefore come from the weaker model as well as from a problem with the code; a matching score rules out a problem. `LIMEN_LLM=sonnet sbatch ...` uses Claude Sonnet 4.6 through OpenRouter, as in the paper, with an OpenRouter key in `OPENAI_API_KEY` or in `reproduction/LIMEN-original/.env`. The paper reports $1.94 to $5.61 of API cost per task.
+
+The first job builds the environment (JAX with CUDA, XLand-MiniGrid, Brax, and MuJoCo Playground for the robot tasks) under `baseline_runs/reproduction/_deps/`.
+
+### Retraining LLM-GE's best gene
+
+```bash
+sbatch --array=1-5 sota/MujocoRL/Baseline/reproduction/slurm/retrain.sh sota/MujocoRL/models/network_xXxbGMMPUTN0Xm70dnUhW8Zl7ch.py best_gene
+sbatch --array=1-5 sota/MujocoRL/Baseline/reproduction/slurm/retrain.sh sota/MujocoRL/network.py seed_network
+```
+
+Each array task trains the network once with `train_rl.py` (TD3, 500k steps, 10 evaluation episodes) with a fresh random seed. The first line repeats the gene that scored 4775.6; the second gives the unchanged seed network for reference. Results are in `baseline_runs/reproduction/retrain/<name>/`.
+
 ## Results so far
 
 One run per method, so these are preliminary. LLM-GE and LIMEN are compared at 26M steps because that is what the available LLM-GE run used: 52 successful trainings.
