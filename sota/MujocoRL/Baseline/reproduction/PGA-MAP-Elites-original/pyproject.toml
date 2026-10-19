@@ -15,6 +15,8 @@ dependencies = [
     "scikit-learn==0.24.2",
     "cloudpickle",
     "joblib",
+    # pybullet_envs imports pkg_resources, which uv environments do not include by default
+    "setuptools<70",
     "QDgym @ git+https://github.com/ollenilsson19/QDgym.git",
 ]
 
