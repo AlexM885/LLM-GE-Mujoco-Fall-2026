@@ -110,7 +110,7 @@ This cuts LIMEN at the given number of training steps, takes the PGA-MAP-Elites 
 | Folder or file | What it is |
 |---|---|
 | `reproduction/PGA-MAP-Elites-original/` | The authors' code, unchanged, plus a `pyproject.toml` with the paper's pinned versions (Python 3.8, torch 1.7.1, gym 0.15.4, pybullet 3.0.8, QDgym). `paper_results/` holds the paper's reported numbers and curves. |
-| `reproduction/LIMEN-original/` | The authors' code, unchanged except for a client for the LLM-GE model server in `limen/llm_client.py` and `limen/config.py`. |
+| `reproduction/LIMEN-original/` | The authors' code with two changes: a client for the LLM-GE model server (`limen/llm_client.py`, `limen/config.py`), and the gridworld wrapper turning the evolved reward into a float32 scalar (`limen/adapters/xminigrid.py`), as the authors' robot wrapper already does. |
 | `reproduction/retrain.py` | Trains one network file exactly as LLM-GE trains a gene, with the output kept separate. |
 | `reproduction/slurm/` | The job scripts below. |
 
@@ -134,6 +134,19 @@ Read off the paper's curves (`paper_results/progress_all.pdf`), roughly: coverag
 
 The progress file's columns are: evaluations, coverage, max fitness, QD-score, mean, median, 5th and 95th percentile fitness, then the 10-episode re-evaluation of the best.
 
+**Result (job 6381987, seed 0).** On a 96-core node the full 1,000,000 evaluations finished in 7 hours 5 minutes.
+
+| Evaluations | Coverage | Max fitness | QD-score |
+|---|---|---|---|
+| 50,000 | 1008 | 979.3 | 171,567 |
+| 100,000 | 1016 | 1617.1 | 421,809 |
+| 250,000 | 1023 | 2433.5 | 1,050,511 |
+| 500,000 | 1024 | 2706.4 | 1,307,511 |
+| 1,000,000 | 1024 | 2896.3 | 1,610,460 |
+| Paper median, 1,000,000 | 1022 | 2729.8 | 1,540,100 |
+
+One run lands slightly above the paper's median of 20 on every measure, so the original code reproduces the published result.
+
 ### Original LIMEN on its own tasks
 
 ```bash
@@ -154,6 +167,8 @@ The task is one of `easy`, `medium`, `hard` (XLand-MiniGrid) or `panda`, `go1` (
 By default this uses the LLM-GE server (Llama 3.3 70B), not Claude Sonnet 4.6. A lower score than the paper's can therefore come from the weaker model as well as from a problem with the code; a matching score rules out a problem. `LIMEN_LLM=sonnet sbatch ...` uses Claude Sonnet 4.6 through OpenRouter, as in the paper, with an OpenRouter key in `OPENAI_API_KEY` or in `reproduction/LIMEN-original/.env`. The paper reports $1.94 to $5.61 of API cost per task.
 
 The first job builds the environment (JAX with CUDA, XLand-MiniGrid, Brax, and MuJoCo Playground for the robot tasks) under `baseline_runs/reproduction/_deps/`.
+
+**First attempt (job 6380770, Medium).** All 30 candidates failed in training with the same JAX error: the evolved reward came back as a 1-element array, which the authors' code check accepts but their gridworld training loop cannot use. No candidate was scored, so this run says nothing about LIMEN's performance. The gridworld wrapper now converts the reward to a scalar, as their robot wrapper already did.
 
 ### Retraining LLM-GE's best gene
 

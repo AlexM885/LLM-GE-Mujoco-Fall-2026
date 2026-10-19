@@ -59,9 +59,13 @@ class MDPInterfaceWrapper(Wrapper):
         if self._get_observation is not None:
             replacements["observation"] = self._get_observation(new_timestep.state)
         if self._compute_reward is not None:
-            replacements["reward"] = self._compute_reward(
-                prev_state, action, new_timestep.state
-            )
+            # Added for the reproduction: a reward returned as a 1-element array
+            # passes the crash filter but breaks the training loop's scan, so it
+            # is made a float32 scalar here, as brax_wrapper.py already does.
+            replacements["reward"] = jnp.asarray(
+                self._compute_reward(prev_state, action, new_timestep.state),
+                dtype=jnp.float32,
+            ).reshape(())
         if replacements:
             return new_timestep.replace(**replacements)
         return new_timestep
