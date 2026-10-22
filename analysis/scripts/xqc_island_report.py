@@ -332,8 +332,13 @@ def _label_genes(ax, rows, marks, xy, ink, bg):
             continue
         x, y = xy(r)
         ax.scatter([x], [y], s=150, facecolor="none", edgecolor="#d1495b", linewidth=2, zorder=6)
-        ax.annotate(label, (x, y), xytext=(12, -14 if k % 2 else 10), textcoords="offset points",
-                    fontsize=8.5, color=ink, zorder=7,
+        (x0, x1), (y0, y1) = ax.get_xlim(), ax.get_ylim()
+        right = (x - x0) / (x1 - x0) > 0.7          # flip labels near the right edge inward
+        dy = -14 if k % 2 else 10
+        if (y - y0) / (y1 - y0) < 0.08:             # and lift labels off the bottom edge
+            dy = 10
+        ax.annotate(label, (x, y), xytext=(-12 if right else 12, dy), textcoords="offset points",
+                    ha="right" if right else "left", fontsize=8.5, color=ink, zorder=7,
                     bbox=dict(boxstyle="round,pad=0.2", fc=bg, ec="none", alpha=0.85))
 
 
