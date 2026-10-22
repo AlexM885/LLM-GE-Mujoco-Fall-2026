@@ -336,7 +336,7 @@ def _label_genes(ax, rows, marks, xy, ink, bg):
         right = (x - x0) / (x1 - x0) > 0.7          # flip labels near the right edge inward
         dy = -14 if k % 2 else 10
         if (y - y0) / (y1 - y0) < 0.08:             # and lift labels off the bottom edge
-            dy = 10
+            dy = 10 + 16 * (k % 2)
         ax.annotate(label, (x, y), xytext=(-12 if right else 12, dy), textcoords="offset points",
                     ha="right" if right else "left", fontsize=8.5, color=ink, zorder=7,
                     bbox=dict(boxstyle="round,pad=0.2", fc=bg, ec="none", alpha=0.85))
