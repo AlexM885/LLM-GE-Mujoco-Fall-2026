@@ -31,8 +31,10 @@ REFERENCE = (speed 0, effort 600) so they compare across runs:
   global_hypervolume             hypervolume of the Pareto front of every archive gene
   max_speed, mean_speed          over the genes trained so far (status ok)
 Extra figures: pareto_front.png (speed vs effort of every trained gene, the
-non-dominated ones joined as a staircase) and foot_contact_map.png (best score in
-each foot-contact cell of the final archive).
+non-dominated ones joined as a staircase), foot_contact_map.png (best score in
+each foot-contact cell of the final archive) and archive_growth.png (filled cells
+and hypervolume after each generation; generations where every gene failed are
+shaded). --highlight GENE_ID=LABEL (repeatable) labels genes on the first two.
 analysis/results is gitignored (**/results/), so commit a report with git add -f.
 """
 
@@ -105,6 +107,8 @@ def main():
     ap.add_argument("run", help="run directory, e.g. xqc_island_run2")
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed-mean", type=float, help="seed config's mean on the same seeds/budget (reference line)")
+    ap.add_argument("--highlight", action="append", default=[], metavar="GENE_ID=LABEL",
+                    help="label this gene on the Pareto front and the foot-contact map")
     args = ap.parse_args()
 
     gens = sorted(int(p.rsplit("_", 1)[1][:-4]) for p in glob.glob(f"{args.run}/global_data/global_gen_*.pkl"))
@@ -218,9 +222,11 @@ def main():
         w.writerows(gen_rows)
     plot(rows, gen_rows, args, f"{args.out}/fitness_by_generation.png")
     if objs:
-        plot_pareto(rows, f"{args.out}/pareto_front.png")
+        marks = dict(h.split("=", 1) for h in args.highlight)
+        plot_pareto(rows, f"{args.out}/pareto_front.png", marks)
         if archive and is_mome(archive):
-            plot_cells(archive, score, f"{args.out}/foot_contact_map.png")
+            plot_cells(archive, score, f"{args.out}/foot_contact_map.png", rows, marks)
+            plot_growth(gen_rows, f"{args.out}/archive_growth.png")
     for r in gen_rows:
         print(r)
 
@@ -280,7 +286,7 @@ def _style(ax, muted, grid, bg):
     ax.tick_params(colors=muted)
 
 
-def plot_pareto(rows, path):
+def plot_pareto(rows, path, marks=None):
     """Speed vs effort of every trained gene; the Pareto front (no other gene is both
     faster and cheaper) is drawn as a staircase: each step is the best speed you can
     get for at most that much effort."""
@@ -303,9 +309,11 @@ def plot_pareto(rows, path):
     ys.append(ys[-1])
     ax.plot(xs[1:], ys[1:], color=ink, lw=2, zorder=4, drawstyle="default", label="Pareto front")
     ax.scatter([e for _, e in front], [s for s, _ in front], s=60, color=ink, edgecolor=bg, linewidth=2, zorder=5)
+    _label_genes(ax, rows, marks, lambda r: (r["effort"], r["speed"]), ink, bg)
     ax.set_xlabel("Effort (sum of 0.1 x squared motor commands per episode, lower is better)", color=ink)
     ax.set_ylabel("Speed (sum of forward reward per episode)", color=ink)
-    ax.set_title("Speed vs effort of every trained gene", loc="left", fontsize=12, color=ink)
+    ax.set_title(f"Speed vs effort of every trained gene ({len(pts)}); {len(front)} on the Pareto front",
+                 loc="left", fontsize=12, color=ink)
     ax.legend(loc="upper left", bbox_to_anchor=(0, -0.14), ncol=2, fontsize=9, frameon=False)
     _style(ax, muted, grid, bg)
     ax.yaxis.set_major_formatter(matplotlib.ticker.StrMethodFormatter("{x:,.0f}"))
@@ -313,7 +321,57 @@ def plot_pareto(rows, path):
     fig.savefig(path, dpi=160)
 
 
-def plot_cells(archive, score, path):
+def _label_genes(ax, rows, marks, xy, ink, bg):
+    """Ring and label each highlighted gene; labels alternate sides to avoid overlap."""
+    if not marks:
+        return
+    by_id = {r["gene_id"]: r for r in rows}
+    for k, (gene, label) in enumerate(marks.items()):
+        r = by_id.get(gene)
+        if r is None or r.get("speed", "") == "":
+            continue
+        x, y = xy(r)
+        ax.scatter([x], [y], s=150, facecolor="none", edgecolor="#d1495b", linewidth=2, zorder=6)
+        ax.annotate(label, (x, y), xytext=(12, -14 if k % 2 else 10), textcoords="offset points",
+                    fontsize=8.5, color=ink, zorder=7,
+                    bbox=dict(boxstyle="round,pad=0.2", fc=bg, ec="none", alpha=0.85))
+
+
+def plot_growth(gen_rows, path):
+    """Filled cells and hypervolume after each generation, as two panels on one
+    generation axis. Generations where every gene failed are shaded."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ink, muted, grid, bg, line = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb", "#2a78d6"
+    gr = [r for r in gen_rows if r.get("archive_cells", "") != ""]
+    gens = [r["generation"] for r in gr]
+    dead = [r["generation"] for r in gr if r["evaluated"] and not r["ok"]]
+    fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+    fig.patch.set_facecolor(bg)
+    series = [([r["archive_cells"] for r in gr], f"Filled cells (of {MAP_BINS * MAP_BINS})", "{x:,.0f}"),
+              ([r["global_hypervolume"] / 1e6 for r in gr], "Hypervolume (millions)", "{x:.2f}")]
+    for ax, (ys, label, fmt) in zip(axes, series):
+        for g in dead:
+            ax.axvspan(g - 0.5, g + 0.5, color=grid, zorder=1, lw=0)
+        ax.plot(gens, ys, color=line, lw=2, zorder=3)
+        ax.set_ylabel(label, color=ink)
+        _style(ax, muted, grid, bg)
+        ax.grid(axis="x", visible=False)
+        ax.yaxis.set_major_formatter(matplotlib.ticker.StrMethodFormatter(fmt))
+        ax.annotate(f"{ys[-1]:,.2f}" if "Hyper" in label else f"{ys[-1]:,.0f}", (gens[-1], ys[-1]),
+                    xytext=(4, 0), textcoords="offset points", va="center", fontsize=9, color=ink)
+    axes[1].set_xlabel("Generation", color=ink)
+    title = "How the archive grew"
+    if dead:
+        title += f"  (shaded: generations {dead[0]}-{dead[-1]}, no LLM server, every gene failed)"
+    axes[0].set_title(title, loc="left", fontsize=11, color=ink)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+
+
+def plot_cells(archive, score, path, rows=None, marks=None):
     """Best score in each filled foot-contact cell of the final archive."""
     import matplotlib
     matplotlib.use("Agg")
@@ -327,14 +385,19 @@ def plot_cells(archive, score, path):
             grid_vals[cell[1], cell[0]] = max(vals)
     fig, ax = plt.subplots(figsize=(6.5, 5.5))
     fig.patch.set_facecolor(bg)
-    im = ax.imshow(grid_vals, origin="lower", extent=(0, 1, 0, 1), cmap="Blues", interpolation="nearest")
+    # Blues from 15% up, so cells with a score near 0 are still visible.
+    cmap = matplotlib.colors.ListedColormap(plt.get_cmap("Blues")(np.linspace(0.15, 1.0, 256)))
+    im = ax.imshow(grid_vals, origin="lower", extent=(0, 1, 0, 1), cmap=cmap, interpolation="nearest")
     cb = fig.colorbar(im, ax=ax, fraction=0.046)
     cb.set_label("Best score in cell", color=ink)
     ax.set_xlabel("Back foot on the ground (share of steps)", color=ink)
     ax.set_ylabel("Front foot on the ground (share of steps)", color=ink)
-    ax.set_title(f"Filled cells: {len(archive)} of {MAP_BINS * MAP_BINS}", loc="left", fontsize=12, color=ink)
+    ax.set_title(f"Running styles found: {len(archive)} of {MAP_BINS * MAP_BINS} cells", loc="left",
+                 fontsize=12, color=ink)
     _style(ax, muted, grid, bg)
     ax.grid(False)
+    if rows:
+        _label_genes(ax, rows, marks, lambda r: (r["foot_contact_0"], r["foot_contact_1"]), ink, bg)
     fig.tight_layout()
     fig.savefig(path, dpi=160)
 
