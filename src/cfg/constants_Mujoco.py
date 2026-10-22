@@ -273,15 +273,18 @@ MAP_ELITES_OBJECTIVE = "mean_reward"
 #: cannot be built, trained or evaluated. Genes at or below it never enter the
 #: archive, so a broken model cannot occupy a niche or be drawn as a parent.
 FAILED_EVAL_SENTINEL = -999999.0
-#: How parents are drawn from the archive: "uniform", or "sparse" for the
-#: Sparse LLM Emitter of Koh & Wong et al. (GECCO Companion '26, Eq. 4-5).
-#: "sparse" draws a cell with probability proportional to
+#: QD-LLMs of Koh & Wong et al. (GECCO Companion '26). When on, an LLM
+#: allocator splits every generation's offspring between three LLM emitters,
+#: uniform, sparse and directional (Eq. 8). When off, parents are drawn
+#: uniformly from the archive and no curiosity or emitter history is kept.
+#: Set USE_LLM_EMITTERS=0 in the environment to turn it off.
+USE_LLM_EMITTERS = os.getenv("USE_LLM_EMITTERS", "1").strip().lower() not in ("0", "false", "no", "off")
+#: The sparse emitter draws a cell with probability proportional to
 #:
 #:     w_c = (1 - alpha) * s_c + alpha * q_c
 #:
 #:     s_c = 1 / (1 + n_c)    n_c = occupied cells among the 8 surrounding c
 #:     q_c = curiosity of c   recent success of c's elite as a parent
-MAP_ELITES_EMITTER = os.getenv("MAP_ELITES_EMITTER", "sparse")
 SPARSE_EMITTER_ALPHA = 0.5
 #: Curiosity credited to the parent's cell per offspring, by what the offspring
 #: did to the archive. Offspring that failed to train change nothing.
@@ -293,6 +296,28 @@ CURIOSITY_DECAY = 0.95
 #: Rejections can push w_c below zero; it is clipped to this so that no cell
 #: is ever excluded from selection outright.
 SPARSE_EMITTER_MIN_WEIGHT = 0.01
+#: The directional emitter (Sec. 3.2.3) aims each offspring at an empty target cell far
+#: from every occupied one. The source parent is drawn with the sparse weights
+#: above; the guide is the elite furthest along the source-to-target direction
+#: (Eq. 6). One LLM crossover of the two, told the descriptor gap and the
+#: target, produces the child. Within a generation the i-th directional
+#: offspring aims at the i-th furthest empty cell, so they do not all chase
+#: the same one.
+#:
+#: What each descriptor means, quoted to the LLM in the directional prompt.
+MAP_ELITES_DESCRIPTOR_NOTES = {
+    "foot_contact_0": "fraction of simulation steps the right foot touches the ground",
+    "foot_contact_1": "fraction of simulation steps the left foot touches the ground",
+}
+#: The allocator (Sec. 3.2, step 1) shows the LLM the archive size and total
+#: fitness and each emitter's success rate (archive insertions / new
+#: offspring) over the last EMITTER_ALLOCATOR_WINDOW generations, and asks how
+#: many of the generation's offspring each emitter should produce.
+EMITTER_ALLOCATOR_WINDOW = 10
+EMITTER_ALLOCATOR_TEMPERATURE = 0.5
+#: Seconds to wait for the allocator's answer before splitting the generation
+#: evenly between the emitters instead.
+EMITTER_ALLOCATOR_TIMEOUT = 900
 
 """
 Misc. Non-sense

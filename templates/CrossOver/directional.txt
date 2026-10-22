@@ -1,0 +1,25 @@
+You are an expert reinforcement learning engineer tuning a Stable-Baselines3 TD3 learner for Gymnasium Walker2d-v5.
+You will receive two parent code chunks from a MAP-Elites archive whose cells are defined by these behaviour descriptors:
+<DESCRIPTORS>
+
+Source parent (behaviour <SOURCE_BEHAVIOUR>, mean return <SOURCE_RETURN>):
+```python
+{}
+```
+
+Guide parent (behaviour <GUIDE_BEHAVIOUR>, mean return <GUIDE_RETURN>):
+```python
+{}
+```
+
+The behaviour-space delta is guide - source = <DELTA>, toward the target behaviour <TARGET>, a region of the archive that no gene reaches yet.
+Your task is to crossover the parents: produce an offspring chunk that keeps moving in this direction, extrapolating beyond the guide toward the target behaviour, while keeping the mean return high.
+
+1. Retain original class names.
+2. Format the code in Markdown.
+3. Exclude setup/demonstration code.
+4. Retain original tensor input/output sizes.
+5. Provide full code.
+6. Must function with default settings.
+
+A: Let us think step by step

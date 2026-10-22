@@ -40,13 +40,21 @@ MAP_BINS = globals().get("MAP_BINS", 20)
 MAP_ELITES_DESCRIPTORS = globals().get("MAP_ELITES_DESCRIPTORS", [])
 MAP_ELITES_OBJECTIVE = globals().get("MAP_ELITES_OBJECTIVE", "mean_reward")
 FAILED_EVAL_SENTINEL = globals().get("FAILED_EVAL_SENTINEL", -999999.0)
-MAP_ELITES_EMITTER = globals().get("MAP_ELITES_EMITTER", "uniform")
+# QD-LLMs on: an LLM allocator splits each generation between the three LLM
+# emitters. Off: parents are drawn uniformly from the archive.
+USE_LLM_EMITTERS = globals().get("USE_LLM_EMITTERS", False)
 SPARSE_EMITTER_ALPHA = globals().get("SPARSE_EMITTER_ALPHA", 0.5)
 CURIOSITY_NEW_CELL = globals().get("CURIOSITY_NEW_CELL", 1.0)
 CURIOSITY_REPLACED_ELITE = globals().get("CURIOSITY_REPLACED_ELITE", 0.5)
 CURIOSITY_REJECTED = globals().get("CURIOSITY_REJECTED", -0.1)
 CURIOSITY_DECAY = globals().get("CURIOSITY_DECAY", 0.95)
 SPARSE_EMITTER_MIN_WEIGHT = globals().get("SPARSE_EMITTER_MIN_WEIGHT", 0.01)
+EMITTERS = ("uniform", "sparse", "directional")
+MAP_ELITES_DESCRIPTOR_NOTES = globals().get("MAP_ELITES_DESCRIPTOR_NOTES", {})
+DIRECTIONAL_PROMPT_TEMPLATE = globals().get("DIRECTIONAL_PROMPT_TEMPLATE", "templates/CrossOver/directional.txt")
+EMITTER_ALLOCATOR_WINDOW = globals().get("EMITTER_ALLOCATOR_WINDOW", 10)
+EMITTER_ALLOCATOR_TEMPERATURE = globals().get("EMITTER_ALLOCATOR_TEMPERATURE", 0.5)
+EMITTER_ALLOCATOR_TIMEOUT = globals().get("EMITTER_ALLOCATOR_TIMEOUT", 900)
 # Budget of successfully trained genes for the whole run; 0 disables it.
 MAX_SUCCESSFUL_EVALS = globals().get("MAX_SUCCESSFUL_EVALS", 0)
 
@@ -202,6 +210,7 @@ def write_bash_script(llm_model,
                       python_file='src/llm_mutation.py', 
                       top_p=0.1, temperature=0.2,
                       gpu=None,
+                      template_file=None,
                      ):
     
     print("WRITING write_bash_script, llm_model: ", llm_model)
@@ -235,6 +244,8 @@ def write_bash_script(llm_model,
                                                 mutation_type=None, gene_id_parent2=gene_id_parent2)
         
         temp_text = f"{python_file} {input_filename_x} {input_filename_y} {output_filename} --top_p {top_p} --temperature {temperature}"
+        if template_file:
+            temp_text += f" --template_txt {template_file}"
         python_runline = f"uv run python {temp_text} --apply_quality_control '{QC_CHECK_BOOL}' --llm_model {llm_model}"
     else:
         raise ValueError("Invalid python_file argument")
@@ -805,57 +816,67 @@ def delayed_mutate_check(offspring):
                   
     return offspring
 
+def combine_elements(ind1, ind2, llm_model, temp_min=0.05, temp_max=0.1, prompt_txt=None):
+    """
+    Combine elements of two individuals to create a new individual.
+    Parameters:
+    ind1, ind2 (list): The parent individuals.
+    prompt_txt (str, optional): Crossover prompt with two "{}" code slots
+        (ind1's chunk, then ind2's). Defaults to a generic crossover prompt.
+    Returns:
+    str: The gene ID of the new individual.
+    """
+    global GLOBAL_DATA
+    out_dir = os.path.join(OUTPUT_DIR, str(GENERATION))
+    config = load_yaml()
+    # Retrieve gene IDs from the individuals
+    gene_id_1 = ind1[0]
+    gene_id_2 = ind2[0]
+    # Generate the crossover query
+    print(f'Mating: {gene_id_1} and {gene_id_2}')
+    temperature = round(random.uniform(temp_min, temp_max), 2)
+    # Generate a new gene ID for the offspring
+    new_gene_id = generate_random_string(length=24)
+    template_file = None
+    if prompt_txt is not None:
+        os.makedirs(out_dir, exist_ok=True)
+        template_file = os.path.join(out_dir, f'{new_gene_id}_crossover.txt')
+        with open(template_file, 'w') as file:
+            file.write(prompt_txt)
+    # Create the bash file for the new job
+    file_path = os.path.join(out_dir, f'{new_gene_id}.sh')
+    successful_sub_flag, job_id, local_output = submit_bash(file_path,
+                                      input_filename_x=f'{VARIANT_DIR}/{MODEL}_{gene_id_1}.py',
+                                      input_filename_y=f'{VARIANT_DIR}/{MODEL}_{gene_id_2}.py',
+                                      output_filename=f'{VARIANT_DIR}/{MODEL}_{new_gene_id}.py',
+                                      gpu=config.get("LLM_GPU"),
+                                      python_file='src/llm_crossover.py',
+                                      job_name="crossover_operation",
+                                      top_p=0.1, llm_model=llm_model, temperature=temperature,
+                                      template_file=template_file)
+
+    # Update global data for the new individual
+    GLOBAL_DATA[new_gene_id] = {'sub_flag':successful_sub_flag, 'job_id':job_id,
+                                'status':'subbed file', 'fitness':None, 'start_time':time.time()}
+
+    if DELAYED_CHECK:
+        GLOBAL_DATA[new_gene_id]['status'] = 'DELAYED_CHECK'
+        return new_gene_id, None
+
+    job_done = False
+    if successful_sub_flag:
+        print(f'\t‣ Checking for Crossover Job Completion: {job_id} for {new_gene_id}')
+        job_done = check4job_completion(job_id, local_output, extension="evolution/")
+        if job_done:
+            print(f'\t‣ Model Files for {new_gene_id} are Loaded')
+        else:
+            print(f'\t‣ Error Loading Model Files for {new_gene_id}!!')
+
+    failed_process = True if (successful_sub_flag is False) or (job_done is False) else False
+    # Return the new gene ID
+    return new_gene_id, failed_process
+
 def customCrossover(ind1, ind2, llm_model):
-    def combine_elements(ind1, ind2, llm_model, temp_min=0.05, temp_max=0.1):
-        """
-        Combine elements of two individuals to create a new individual.
-        Parameters:
-        ind1, ind2 (list): The parent individuals.
-        Returns:
-        str: The gene ID of the new individual.
-        """
-        global GLOBAL_DATA
-        out_dir = os.path.join(OUTPUT_DIR, str(GENERATION))
-        config = load_yaml()
-        # Retrieve gene IDs from the individuals
-        gene_id_1 = ind1[0]
-        gene_id_2 = ind2[0]
-        # Generate the crossover query
-        print(f'Mating: {gene_id_1} and {gene_id_2}')
-        temperature = round(random.uniform(temp_min, temp_max), 2)
-        # Generate a new gene ID for the offspring
-        new_gene_id = generate_random_string(length=24)
-        # Create the bash file for the new job
-        file_path = os.path.join(out_dir, f'{new_gene_id}.sh')
-        successful_sub_flag, job_id, local_output = submit_bash(file_path, 
-                                          input_filename_x=f'{VARIANT_DIR}/{MODEL}_{gene_id_1}.py',
-                                          input_filename_y=f'{VARIANT_DIR}/{MODEL}_{gene_id_2}.py',
-                                          output_filename=f'{VARIANT_DIR}/{MODEL}_{new_gene_id}.py',
-                                          gpu=config.get("LLM_GPU"),
-                                          python_file='src/llm_crossover.py',
-                                          job_name="crossover_operation",
-                                          top_p=0.1, llm_model=llm_model, temperature=temperature)
-
-        # Update global data for the new individual
-        GLOBAL_DATA[new_gene_id] = {'sub_flag':successful_sub_flag, 'job_id':job_id, 
-                                    'status':'subbed file', 'fitness':None, 'start_time':time.time()}
-        
-        if DELAYED_CHECK:
-            GLOBAL_DATA[new_gene_id]['status'] = 'DELAYED_CHECK'
-            return new_gene_id, None
-        
-        if successful_sub_flag:
-            print(f'\t‣ Checking for Crossover Job Completion: {job_id} for {new_gene_id}')
-            job_done = check4job_completion(job_id, local_output, extension="evolution/")
-            if job_done:
-                print(f'\t‣ Model Files for {new_gene_id} are Loaded')
-            else: 
-                print(f'\t‣ Error Loading Model Files for {new_gene_id}!!')
-
-        failed_process = True if (successful_sub_flag is False) or (job_done is False) else False
-        # Return the new gene ID
-        return new_gene_id, failed_process
-    
     global GLOBAL_DATA
     global DELAYED_CHECK
 
@@ -875,10 +896,26 @@ def customCrossover(ind1, ind2, llm_model):
     offspring1 = update_individual(ind1, new_gene_id1, old_gene_id=ind1[0], 
                                    process_success=(not failed_process1), process_type='Mating')
     
-    offspring2 = update_individual(ind2, new_gene_id2, old_gene_id=ind2[0], 
+    offspring2 = update_individual(ind2, new_gene_id2, old_gene_id=ind2[0],
                                    process_success=(not failed_process2), process_type='Mating')
 
     return offspring1, offspring2
+
+def directionalCrossover(child, llm_model):
+    """Directional emitter variation: one LLM crossover of the source elite
+    (child) with its guide, prompted to extrapolate toward an empty cell.
+
+    child carries guide_gene and direction_prompt from select_directional().
+    Like the other operators it rewrites child[0] in place.
+    """
+    new_gene_id, failed_process = combine_elements(child, [child.guide_gene], llm_model,
+                                                   prompt_txt=child.direction_prompt)
+    if DELAYED_CHECK:
+        LINKED_GENES[new_gene_id] = child[0]
+        child[0] = new_gene_id
+        return child
+    return update_individual(child, new_gene_id, old_gene_id=child[0],
+                             process_success=(not failed_process), process_type='Mating')
 
 def customMutation(individual, llm_model, indpb, temp_min=0.02, temp_max=0.35):
     """
@@ -997,6 +1034,7 @@ def save_checkpoint(gen, folder_name="checkpoints", global_path=None, checkpoint
             "hof": hof, 
             "MAP_ELITES_ARCHIVE": MAP_ELITES_ARCHIVE,
             "MAP_ELITES_CURIOSITY": MAP_ELITES_CURIOSITY,
+            "MAP_ELITES_EMITTER_HISTORY": MAP_ELITES_EMITTER_HISTORY,
         }
     filename = os.path.join(folder_name, f'checkpoint_gen_{gen}.pkl')
     with open(filename, 'wb') as file:
@@ -1115,14 +1153,23 @@ def sparse_emitter_weights(bins):
         weights.append(max(weight, SPARSE_EMITTER_MIN_WEIGHT))
     return weights
 
-def select_parents(k):
-    """Draw k parents from the archive, each tagged with the cell it came from.
+def tag_parent(bin_idx, emitter):
+    """Clone the elite of bin_idx as an offspring-to-be of the given emitter.
 
-    The returned individuals are clones, so the tag never reaches the elites
-    themselves. update_archive() reads it to credit curiosity to that cell.
+    The tags stay on the clone, never on the elite itself. update_archive()
+    credits curiosity to parent_bin, and record_emitter_history() scores the
+    emitter, skipping offspring still equal to parent_gene (no variation hit).
     """
+    parent = toolbox.clone(MAP_ELITES_ARCHIVE[bin_idx])
+    parent.parent_bin = bin_idx
+    parent.parent_gene = parent[0]
+    parent.emitter = emitter
+    return parent
+
+def select_parents(k, emitter):
+    """Draw k parents from the archive for the uniform or sparse emitter."""
     bins = list(MAP_ELITES_ARCHIVE.keys())
-    if MAP_ELITES_EMITTER == "sparse":
+    if emitter == "sparse":
         weights = sparse_emitter_weights(bins)
         for bin_idx, weight in sorted(zip(bins, weights), key=lambda bw: -bw[1]):
             print(f"	‣ Sparse emitter: bin {bin_idx} weight {weight:.3f} "
@@ -1131,18 +1178,244 @@ def select_parents(k):
         chosen = random.choices(bins, weights=weights, k=k)
     else:
         chosen = random.choices(bins, k=k)
+    return [tag_parent(bin_idx, emitter) for bin_idx in chosen]
 
+def elite_descriptors(bin_idx):
+    """Behaviour descriptor values m(x) of the elite in bin_idx."""
+    metrics = get_metrics(MAP_ELITES_ARCHIVE[bin_idx][0])
+    if metrics and all(name in metrics for name, _, _ in MAP_ELITES_DESCRIPTORS):
+        return np.array([metrics[name] for name, _, _ in MAP_ELITES_DESCRIPTORS], dtype=float)
+    # Metrics lost (e.g. trimmed global data): the cell centre is the best guess.
+    return bin_centroid(bin_idx)
+
+def bin_centroid(bin_idx):
+    """Centre of a grid cell in descriptor space."""
+    return np.array([lo + (i + 0.5) * (hi - lo) / MAP_BINS
+                     for i, (_, lo, hi) in zip(bin_idx, MAP_ELITES_DESCRIPTORS)], dtype=float)
+
+def directional_targets(k):
+    """The k empty cells furthest (in cells) from any occupied cell.
+
+    This is the distance transform of Koh & Wong et al. Sec. 3.2.3, ranked so
+    that several directional offspring in one generation aim at different
+    gaps. Ties are broken at random. Returns fewer than k if the grid has
+    fewer empty cells.
+    """
+    occupied = np.array(list(MAP_ELITES_ARCHIVE.keys()))
+    empty = np.array([cell for cell in itertools.product(range(MAP_BINS), repeat=len(MAP_ELITES_DESCRIPTORS))
+                      if cell not in MAP_ELITES_ARCHIVE])
+    if len(empty) == 0:
+        return []
+    gaps = np.sqrt(((empty[:, None, :] - occupied[None, :, :]) ** 2).sum(axis=-1)).min(axis=1)
+    order = np.lexsort((np.random.random(len(empty)), -gaps))
+    return [tuple(int(v) for v in empty[i]) for i in order[:k]]
+
+def directional_guide(source_bin, target_bin):
+    """Occupied cell (other than the source) furthest along source -> target (Eq. 6)."""
+    source = elite_descriptors(source_bin)
+    direction = bin_centroid(target_bin) - source
+    direction /= np.linalg.norm(direction)
+    candidates = [b for b in MAP_ELITES_ARCHIVE if b != source_bin]
+    return max(candidates, key=lambda b: float((elite_descriptors(b) - source) @ direction))
+
+def format_behaviour(values):
+    return "(" + ", ".join(f"{name}={value:.3f}"
+                           for (name, _, _), value in zip(MAP_ELITES_DESCRIPTORS, values)) + ")"
+
+def directional_prompt(source_bin, guide_bin, target_bin):
+    """Fill the directional crossover template, leaving its two code slots."""
+    source, guide = elite_descriptors(source_bin), elite_descriptors(guide_bin)
+    notes = "\n".join(f"- {name} in [{lo:g}, {hi:g}]: {MAP_ELITES_DESCRIPTOR_NOTES.get(name, name)}"
+                      for name, lo, hi in MAP_ELITES_DESCRIPTORS)
+    with open(os.path.join(ROOT_DIR, DIRECTIONAL_PROMPT_TEMPLATE), 'r') as file:
+        template_txt = file.read()
+    fields = {
+        "<DESCRIPTORS>": notes,
+        "<SOURCE_BEHAVIOUR>": format_behaviour(source),
+        "<SOURCE_RETURN>": f"{get_quality(MAP_ELITES_ARCHIVE[source_bin]):.1f}",
+        "<GUIDE_BEHAVIOUR>": format_behaviour(guide),
+        "<GUIDE_RETURN>": f"{get_quality(MAP_ELITES_ARCHIVE[guide_bin]):.1f}",
+        "<DELTA>": format_behaviour(guide - source),
+        "<TARGET>": format_behaviour(bin_centroid(target_bin)),
+    }
+    for token, value in fields.items():
+        template_txt = template_txt.replace(token, value)
+    return template_txt
+
+def select_directional(k):
+    """Draw k source parents for the directional emitter, each with a guide and prompt.
+
+    Sources are drawn with the sparse emitter's weights (Eq. 5). With fewer
+    than two occupied cells there is no guide, and with no empty cell there
+    is no target; the sparse emitter stands in for those cases.
+    """
+    targets = directional_targets(k) if len(MAP_ELITES_ARCHIVE) >= 2 else []
+    if not targets:
+        print("	‣ Directional emitter: no guide or no empty cell; using the sparse emitter")
+        return select_parents(k, "sparse")
+    bins = list(MAP_ELITES_ARCHIVE.keys())
+    sources = random.choices(bins, weights=sparse_emitter_weights(bins), k=k)
     parents = []
-    for bin_idx in chosen:
-        parent = toolbox.clone(MAP_ELITES_ARCHIVE[bin_idx])
-        parent.parent_bin = bin_idx
+    for i, source_bin in enumerate(sources):
+        target_bin = targets[i % len(targets)]
+        guide_bin = directional_guide(source_bin, target_bin)
+        parent = tag_parent(source_bin, "directional")
+        parent.guide_gene = MAP_ELITES_ARCHIVE[guide_bin][0]
+        parent.direction_prompt = directional_prompt(source_bin, guide_bin, target_bin)
+        print(f"	‣ Directional emitter: source bin {source_bin} -> target bin {target_bin} "
+              f"via guide bin {guide_bin}")
         parents.append(parent)
     return parents
+
+def select_offspring(allocation):
+    """Parents for one generation: allocation maps each emitter to its count."""
+    offspring = []
+    for emitter, k in allocation.items():
+        if k <= 0:
+            continue
+        if emitter == "directional":
+            offspring.extend(select_directional(k))
+        else:
+            offspring.extend(select_parents(k, emitter))
+    # Mix the emitters so that crossover pairs are not all from one of them.
+    random.shuffle(offspring)
+    return offspring
+
+def query_llm(prompt, temperature, max_new_tokens=600, timeout=600):
+    """Send a prompt to the local LLM server and return its text, or None."""
+    if not globals().get("LOCAL_LLM", False) or not wait_for_llm_server():
+        return None
+    try:
+        with open(HOSTNAME_DIR, 'r') as file:
+            hostname = file.readline().strip()
+        payload = json.dumps({"prompt": prompt, "max_new_tokens": max_new_tokens,
+                              "temperature": temperature, "top_p": 0.9}).encode()
+        request = urllib.request.Request(f"http://{hostname}:{PORT}/generate", data=payload,
+                                         headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode()).get("generated_text")
+    except (OSError, ValueError) as err:
+        print(f"	☠ LLM request failed: {err}", flush=True)
+        return None
+
+def even_allocation(n):
+    """Split n offspring between the emitters as evenly as possible."""
+    counts = {emitter: n // len(EMITTERS) for emitter in EMITTERS}
+    for emitter in random.sample(EMITTERS, n % len(EMITTERS)):
+        counts[emitter] += 1
+    return counts
+
+def parse_allocation(reply, n):
+    """Emitter counts from the allocator's reply, rescaled to sum to n.
+
+    Takes the last JSON object in the reply that names at least one emitter
+    with a positive count. Returns None if there is none.
+    """
+    if not reply:
+        return None
+    for match in reversed(re.findall(r"\{[^{}]*\}", reply)):
+        try:
+            data = json.loads(match)
+            raw = {emitter: max(0.0, float(data.get(emitter, 0))) for emitter in EMITTERS}
+        except (ValueError, TypeError, AttributeError):
+            continue
+        total = sum(raw.values())
+        if total <= 0:
+            continue
+        # Largest-remainder rounding, in case the counts do not sum to n.
+        exact = {emitter: raw[emitter] * n / total for emitter in EMITTERS}
+        counts = {emitter: int(exact[emitter]) for emitter in EMITTERS}
+        by_remainder = sorted(EMITTERS, key=lambda e: exact[e] - counts[e], reverse=True)
+        for emitter in by_remainder[:n - sum(counts.values())]:
+            counts[emitter] += 1
+        return counts
+    return None
+
+def allocator_prompt(n, gen):
+    """Meta-prompt of the LLM allocator (Koh & Wong et al. Fig. 1c, Eq. 8)."""
+    window = MAP_ELITES_EMITTER_HISTORY[-EMITTER_ALLOCATOR_WINDOW:]
+    total_cells = MAP_BINS ** len(MAP_ELITES_DESCRIPTORS)
+    archive_lines = "\n".join(
+        f"  generation {entry['gen']}: {entry['cells']} occupied cells, total mean return {entry['total_fitness']:.1f}"
+        for entry in window) or "  (no history yet)"
+    def rates(emitter):
+        values = [entry['success'].get(emitter) for entry in window]
+        return "[" + ", ".join("n/a" if r is None else f"{r:.2f}" for r in values) + "]"
+    emitter_lines = "\n".join(f"  {emitter}: {rates(emitter)}" for emitter in EMITTERS)
+    return f"""You are an expert in Quality-Diversity optimization. You have access to an emitter set E = {{{", ".join(EMITTERS)}}}. Your task is to allocate N = {n} offspring among these emitters to maximize archive coverage and fitness. Analyze the search phase from t, evaluate the archive history and the emitter performance histories over a sliding window W = {EMITTER_ALLOCATOR_WINDOW}, where each r in [0, 1] is a success rate, then balance exploration against exploitation.
+
+Each offspring is an LLM edit of a TD3 learner for Gymnasium Walker2d-v5. It is trained, scored by mean return, and placed in a {MAP_BINS} x {MAP_BINS} MAP-Elites grid over the fraction of time each foot touches the ground, where it survives only if it fills an empty cell or beats that cell's elite.
+- uniform: varies an elite drawn uniformly from the archive (broad exploration).
+- sparse: varies an elite drawn from cells with few occupied neighbours or recent success (expands the archive's frontier).
+- directional: crosses an elite with a guide elite to push toward the empty cell furthest from the archive (fills gaps).
+
+Search phase: generation t = {gen}, {len(MAP_ELITES_ARCHIVE)} of {total_cells} cells occupied.
+Archive history (oldest first):
+{archive_lines}
+Emitter success rates r = archive insertions / new offspring (oldest first; n/a = emitter not used):
+{emitter_lines}
+
+Answer with one JSON object of non-negative integers summing to {n}, giving how many offspring each emitter produces, in this form:
+{{"uniform": <count>, "sparse": <count>, "directional": <count>}}
+"""
+
+def allocate_emitters(n, gen):
+    """How many of this generation's n offspring each emitter produces.
+
+    Without the LLM emitters, plain MAP-Elites: every parent is drawn uniformly.
+    """
+    if not USE_LLM_EMITTERS:
+        return {"uniform": n}
+    prompt = allocator_prompt(n, gen)
+    box_print("EMITTER ALLOCATOR PROMPT", print_bbox_len=60, new_line_end=False)
+    print(prompt, flush=True)
+    reply = query_llm(prompt, temperature=EMITTER_ALLOCATOR_TEMPERATURE, timeout=EMITTER_ALLOCATOR_TIMEOUT)
+    print(f"	‣ Allocator reply: {reply}", flush=True)
+    allocation = parse_allocation(reply, n)
+    if allocation is None:
+        allocation = even_allocation(n)
+        print("	☠ Allocator gave no usable answer; splitting evenly", flush=True)
+    return allocation
+
+def record_emitter_history(gen, offspring, updated_genes):
+    """Append this generation's archive state and emitter success rates.
+
+    An emitter's success rate is r_e = n_e+ / n_e: offspring that entered the
+    archive over new offspring it produced. Offspring that no variation
+    reached are still their parent and count for neither; offspring that
+    failed to train count as produced but never insert.
+    """
+    allocation = {emitter: 0 for emitter in EMITTERS}
+    produced = dict(allocation)
+    inserted = dict(allocation)
+    for ind in offspring:
+        emitter = getattr(ind, "emitter", None)
+        if emitter not in allocation:
+            continue
+        allocation[emitter] += 1
+        if ind[0] == getattr(ind, "parent_gene", None):
+            continue
+        produced[emitter] += 1
+        if ind[0] in updated_genes:
+            inserted[emitter] += 1
+    success = {emitter: (inserted[emitter] / produced[emitter] if produced[emitter] else None)
+               for emitter in EMITTERS}
+    MAP_ELITES_EMITTER_HISTORY.append({
+        "gen": gen,
+        "cells": len(MAP_ELITES_ARCHIVE),
+        "total_fitness": float(sum(get_quality(i) for i in MAP_ELITES_ARCHIVE.values())),
+        "allocation": allocation,
+        "success": success,
+    })
+    for emitter in EMITTERS:
+        if allocation[emitter]:
+            print(f"	‣ Emitter {emitter}: {allocation[emitter]} offspring, {produced[emitter]} new, "
+                  f"{inserted[emitter]} inserted")
 
 def credit_curiosity(ind, reward):
     """Add reward to the curiosity of the cell ind's parent was drawn from."""
     parent_bin = getattr(ind, "parent_bin", None)
-    if parent_bin is None:
+    if not USE_LLM_EMITTERS or parent_bin is None:
         return
     MAP_ELITES_CURIOSITY[parent_bin] = MAP_ELITES_CURIOSITY.get(parent_bin, 0.0) + reward
 
@@ -1152,9 +1425,13 @@ def decay_curiosity():
         MAP_ELITES_CURIOSITY[bin_idx] *= CURIOSITY_DECAY
 
 def update_archive(population):
-    """Insert individuals into the MAP-Elites archive, one elite per cell."""
+    """Insert individuals into the MAP-Elites archive, one elite per cell.
+
+    Returns the gene ids that filled or took over a cell.
+    """
     global MAP_ELITES_ARCHIVE
     added = replaced = 0
+    updated_genes = set()
     for ind in population:
         # Avoid putting invalid generated genes/timeouts into the archive
         if not ind.fitness.valid or tuple(ind.fitness.values) == tuple(INVALID_FITNESS_MAX):
@@ -1179,6 +1456,7 @@ def update_archive(population):
         if occupant is None:
             MAP_ELITES_ARCHIVE[bin_idx] = ind
             added += 1
+            updated_genes.add(ind[0])
             credit_curiosity(ind, CURIOSITY_NEW_CELL)
             print(f"	‣ MAP-Elites: Added {ind[0]} to bin {bin_idx} with {MAP_ELITES_OBJECTIVE} {quality:.2f}")
         elif quality > get_quality(occupant):
@@ -1186,6 +1464,7 @@ def update_archive(population):
                   f"({MAP_ELITES_OBJECTIVE}: {get_quality(occupant):.2f} -> {quality:.2f})")
             MAP_ELITES_ARCHIVE[bin_idx] = ind
             replaced += 1
+            updated_genes.add(ind[0])
             credit_curiosity(ind, CURIOSITY_REPLACED_ELITE)
         elif ind[0] != occupant[0]:
             # An offspring that came through variation unchanged is still the
@@ -1198,7 +1477,7 @@ def update_archive(population):
     print(f"	‣ MAP-Elites: {added} added, {replaced} replaced, "
           f"{len(MAP_ELITES_ARCHIVE)}/{total_cells} cells filled "
           f"({coverage:.1f}% coverage), QD-score(raw) {qd_score:.2f}")
-    return added, replaced
+    return updated_genes
 
 def create_population(n, llm_model):
     individual_func = partial(toolbox.individual, llm_model=llm_model)
@@ -1229,6 +1508,8 @@ GLOBAL_DATA_ANCESTRY = {}
 GLOBAL_DATA_ANCESTRY[MODEL] = {'GENES':[MODEL], 'MUTATE_TYPE':["CREATED"]}
 MAP_ELITES_ARCHIVE = {}
 MAP_ELITES_CURIOSITY = {}
+# One entry per generation: archive state, emitter allocation and success rates.
+MAP_ELITES_EMITTER_HISTORY = []
 
 # Main Evolution Loop
 if __name__ == "__main__":
@@ -1252,6 +1533,9 @@ if __name__ == "__main__":
     print("ISLAND llm_model: ", llm_model)
     print(f"Prompt glob: {PROMPT_GLOB}")
 
+    if USE_MAP_ELITES:
+        print(f"LLM emitters + allocator: {'on' if USE_LLM_EMITTERS else 'off (uniform parent selection)'}")
+
     if AVAILABLE_LLM_MODELS and (not llm_model or llm_model not in AVAILABLE_LLM_MODELS):
         print("Error in Island Generation: No LLM specified. Exiting script")
         exit(1)
@@ -1266,6 +1550,7 @@ if __name__ == "__main__":
         hof = population_data["hof"]
         MAP_ELITES_ARCHIVE = population_data.get("MAP_ELITES_ARCHIVE", {})
         MAP_ELITES_CURIOSITY = population_data.get("MAP_ELITES_CURIOSITY", {})
+        MAP_ELITES_EMITTER_HISTORY = population_data.get("MAP_ELITES_EMITTER_HISTORY", [])
     else:
         # Create an initial population
         start_gen = 1
@@ -1345,12 +1630,17 @@ if __name__ == "__main__":
             elites = []
             # Always produce a full batch of offspring, even while the archive
             # holds fewer individuals than population_size.
+            # Size the batch to the budget before splitting it between
+            # emitters, so the cut does not fall on one emitter only.
+            n_offspring = min(population_size, remaining_evals) if MAX_SUCCESSFUL_EVALS else population_size
             if MAP_ELITES_ARCHIVE:
-                print(f"Selecting {population_size} offspring from the archive ({MAP_ELITES_EMITTER} emitter)")
-                offspring = select_parents(population_size)
+                allocation = allocate_emitters(n_offspring, gen)
+                print(f"Selecting {n_offspring} offspring from the archive: "
+                      + ", ".join(f"{emitter} {k}" for emitter, k in allocation.items()))
+                offspring = select_offspring(allocation)
             else:
-                print(f"Selecting {population_size} offspring uniformly from the population")
-                offspring = [random.choice(population) for _ in range(population_size)]
+                print(f"Selecting {n_offspring} offspring uniformly from the population")
+                offspring = [random.choice(population) for _ in range(n_offspring)]
         else:
             elites = tools.selSPEA2(population, num_elites)
 
@@ -1376,11 +1666,18 @@ if __name__ == "__main__":
 
         # Apply crossover on the offspring
         box_print("Mating", print_bbox_len=60, new_line_end=False)
-        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+        # Directional offspring get exactly one variation, their guided
+        # crossover; everyone else goes through random mating and mutation.
+        directional = [ind for ind in offspring if getattr(ind, "emitter", None) == "directional"]
+        varied = [ind for ind in offspring if getattr(ind, "emitter", None) != "directional"]
+        for child1, child2 in zip(varied[::2], varied[1::2]):
             if random.random() < crossover_probability:
                 child1, child2 = toolbox.mate(child1, child2, llm_model=llm_model)
                 del child1.fitness.values
                 del child2.fitness.values 
+        for child in directional:
+            directionalCrossover(child, llm_model=llm_model)
+            del child.fitness.values
                 
         box_print("Batch Checking Mated Genes", print_bbox_len=60, new_line_end=False)       
         offspring = delayed_mate_check(offspring)
@@ -1388,7 +1685,7 @@ if __name__ == "__main__":
         
         # Apply mutation on the offspring
         box_print("Mutating", print_bbox_len=60, new_line_end=False)
-        for mutant in offspring:
+        for mutant in varied:
             if random.random() < mutation_probability:
                 toolbox.mutate(individual=mutant, llm_model=llm_model)
                 del mutant.fitness.values
@@ -1429,8 +1726,10 @@ if __name__ == "__main__":
         if USE_MAP_ELITES:
             # Offspring only survive if they win a cell of the behaviour grid.
             box_print("UPDATING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
-            update_archive(offspring)
-            decay_curiosity()
+            updated_genes = update_archive(offspring)
+            if USE_LLM_EMITTERS:
+                record_emitter_history(gen, offspring, updated_genes)
+                decay_curiosity()
             population[:] = list(MAP_ELITES_ARCHIVE.values()) or offspring
         else:
             # Replace the old population with the offspring

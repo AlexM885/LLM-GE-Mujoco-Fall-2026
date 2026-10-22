@@ -16,7 +16,8 @@ from llm_utils import (split_file, submit_mixtral, submit_mixtral_hf,
 
 
 def augment_network(input_filename_x, input_filename_y, output_filename,
-                    top_p=0.15, llm_model=LLM_QWEN, temperature=0.1, apply_quality_control=False):
+                    top_p=0.15, llm_model=LLM_QWEN, temperature=0.1, apply_quality_control=False,
+                    template_txt=None):
     """Augment Python Network Script.
     
     Parameters
@@ -35,6 +36,10 @@ def augment_network(input_filename_x, input_filename_y, output_filename,
         _description_, by default 0.1
     apply_quality_control : bool, optional
         _description_, by default False
+    template_txt : os.PathLike, optional
+        Prompt file with two literal "{}" code placeholders (source, then
+        guide). The directional emitter writes one per offspring; by default
+        a generic crossover prompt is drawn at random.
     """
     # Split the input files
     parts_x = split_file(input_filename_x)
@@ -47,14 +52,21 @@ def augment_network(input_filename_x, input_filename_y, output_filename,
         if x.strip() != y.strip():
             break
 
-    # Select a template file
-    template_fname = random.choice(['crossover.txt', 'crossover_s.txt'])
-    template_path = f'{ROOT_DIR}/templates/CrossOver/{template_fname}'
-    with open(template_path, 'r') as file:
-        template_txt = file.read()
+    if template_txt:
+        with open(template_txt, 'r') as file:
+            template_txt = file.read()
+        # Literal replacement: the prompt quotes numbers and descriptor text
+        # that str.format could misread as fields.
+        txt2llm = template_txt.replace("{}", x.strip(), 1).replace("{}", y.strip(), 1)
+    else:
+        # Select a template file
+        template_fname = random.choice(['crossover.txt', 'crossover_s.txt'])
+        template_path = f'{ROOT_DIR}/templates/CrossOver/{template_fname}'
+        with open(template_path, 'r') as file:
+            template_txt = file.read()
 
-    # Add code to be augmented
-    txt2llm = template_txt.format(x.strip(), y.strip())
+        # Add code to be augmented
+        txt2llm = template_txt.format(x.strip(), y.strip())
     # Generate augmented code
     code_from_llm = generate_augmented_code(txt2llm, augment_idx, apply_quality_control,
                                             top_p, llm_model, temperature)
@@ -111,6 +123,7 @@ if __name__ == "__main__":
     parser.add_argument('--top_p', type=float, default=0.15, help='Top P value for text generation')
     parser.add_argument('--temperature', type=float, default=0.1, help='Temperature value for text generation')
     parser.add_argument('--apply_quality_control', type=str2bool, default=False, help='Use LLM QC')
+    parser.add_argument('--template_txt', type=str, default=None, help='Prompt file to use instead of a generic crossover prompt')
 
     # Parse the arguments
     args = parser.parse_args()
@@ -123,4 +136,5 @@ if __name__ == "__main__":
                     llm_model=args.llm_model,
                     temperature=args.temperature,
                     apply_quality_control=args.apply_quality_control,
+                    template_txt=args.template_txt,
                    )
