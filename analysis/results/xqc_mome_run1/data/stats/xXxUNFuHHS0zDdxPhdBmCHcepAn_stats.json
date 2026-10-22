@@ -1,0 +1,42 @@
+{
+  "gene_id": "xXxUNFuHHS0zDdxPhdBmCHcepAn",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxUNFuHHS0zDdxPhdBmCHcepAn",
+  "config": {
+    "hidden_dims_critic": [
+      1024,
+      512,
+      512
+    ],
+    "hidden_dims_actor": [
+      256,
+      256,
+      256
+    ],
+    "n_critics": 2,
+    "use_batch_norm": true,
+    "use_weight_norm": true,
+    "use_layer_norm": false,
+    "pre_activation_bn": true,
+    "normalize_last_layer": true,
+    "skip_connections": false,
+    "actor_lr": 0.0001,
+    "critic_lr": 0.0001,
+    "temp_lr": 0.0001,
+    "lr_end": 1e-05,
+    "tau": 0.01,
+    "policy_delay": 2,
+    "init_temperature": 0.1,
+    "weight_decay": 0.01,
+    "batch_size": 128,
+    "updates_per_step": 1
+  },
+  "command": "/storage/ice1/0/9/swani8/xqc-baseline/venv/bin/python /storage/ice1/0/9/swani8/xqc-baseline/repo/sota/XQC/train_xqc.py env=HalfCheetah-v4 seed=0 num_seeds=3 max_steps=100000 eval_interval=25000 eval_episodes=10 start_training=5000 run_dir=/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxUNFuHHS0zDdxPhdBmCHcepAn checkpoint_interval=0 save_replay_buffer=false final_descriptors=true resume=never final_checkpoint=false save_actor=true agent.hidden_dims_critic=[1024,512,512] agent.hidden_dims_actor=[256,256,256] agent.n_critics=2 agent.use_batch_norm=true agent.use_weight_norm=true agent.use_layer_norm=false agent.pre_activation_bn=true agent.normalize_last_layer=true agent.skip_connections=false agent.actor_lr=0.0001 agent.critic_lr=0.0001 agent.temp_lr=0.0001 agent.lr_end=1e-05 agent.tau=0.01 agent.policy_delay=2 agent.init_temperature=0.1 agent.weight_decay=0.01 batch_size=128 updates_per_step=1",
+  "status": "failed",
+  "error": "train_xqc.py exited 1; see /storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxUNFuHHS0zDdxPhdBmCHcepAn/train.log",
+  "train_time_sec": 3.7463343143463135,
+  "mean_reward": -999999.0
+}

@@ -1,0 +1,12 @@
+{
+  "gene_id": "xXxb08IHMqs09MPjo3q5KuwHEl1",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxb08IHMqs09MPjo3q5KuwHEl1",
+  "status": "failed",
+  "error": "invalid gene: NameError(\"name 'ERROR' is not defined\")",
+  "train_time_sec": 0.005486488342285156,
+  "mean_reward": -999999.0
+}

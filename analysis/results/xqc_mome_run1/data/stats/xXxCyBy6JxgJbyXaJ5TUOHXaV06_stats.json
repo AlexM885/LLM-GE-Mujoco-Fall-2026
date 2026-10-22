@@ -1,0 +1,12 @@
+{
+  "gene_id": "xXxCyBy6JxgJbyXaJ5TUOHXaV06",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxCyBy6JxgJbyXaJ5TUOHXaV06",
+  "status": "failed",
+  "error": "invalid gene: AttributeError(\"module 'gene' has no attribute 'get_xqc_kwargs'\")",
+  "train_time_sec": 0.003724336624145508,
+  "mean_reward": -999999.0
+}

@@ -1,0 +1,62 @@
+{
+  "gene_id": "xXx4DKgmQXIE9L8Dtx9E1ZTlwp4",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXx4DKgmQXIE9L8Dtx9E1ZTlwp4",
+  "config": {
+    "hidden_dims_critic": [
+      1408,
+      1280,
+      768,
+      640
+    ],
+    "hidden_dims_actor": [
+      704,
+      640,
+      384
+    ],
+    "n_critics": 2,
+    "use_batch_norm": true,
+    "use_weight_norm": true,
+    "use_layer_norm": false,
+    "pre_activation_bn": true,
+    "normalize_last_layer": true,
+    "skip_connections": false,
+    "actor_lr": 4e-05,
+    "critic_lr": 4e-05,
+    "temp_lr": 4e-05,
+    "lr_end": 5e-06,
+    "tau": 0.01,
+    "policy_delay": 3,
+    "init_temperature": 0.05,
+    "weight_decay": 0.001,
+    "batch_size": 512,
+    "updates_per_step": 3
+  },
+  "command": "/storage/ice1/0/9/swani8/xqc-baseline/venv/bin/python /storage/ice1/0/9/swani8/xqc-baseline/repo/sota/XQC/train_xqc.py env=HalfCheetah-v4 seed=0 num_seeds=3 max_steps=100000 eval_interval=25000 eval_episodes=10 start_training=5000 run_dir=/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXx4DKgmQXIE9L8Dtx9E1ZTlwp4 checkpoint_interval=0 save_replay_buffer=false final_descriptors=true resume=never final_checkpoint=false save_actor=true agent.hidden_dims_critic=[1408,1280,768,640] agent.hidden_dims_actor=[704,640,384] agent.n_critics=2 agent.use_batch_norm=true agent.use_weight_norm=true agent.use_layer_norm=false agent.pre_activation_bn=true agent.normalize_last_layer=true agent.skip_connections=false agent.actor_lr=4e-05 agent.critic_lr=4e-05 agent.temp_lr=4e-05 agent.lr_end=5e-06 agent.tau=0.01 agent.policy_delay=3 agent.init_temperature=0.05 agent.weight_decay=0.001 batch_size=512 updates_per_step=3",
+  "status": "ok",
+  "train_time_sec": 6764.689991474152,
+  "mean_reward": 4334.008160846303,
+  "std_reward": 91.23268675053764,
+  "per_seed_return": [
+    4211.000896868343,
+    4429.23143776335,
+    4361.792147907217
+  ],
+  "param_count": 716398,
+  "mean_distance": 224.02916174706704,
+  "mean_control_cost": 0.14657507409503692,
+  "mean_return_forward": 4480.58323494134,
+  "mean_return_ctrl": -146.57507409503688,
+  "foot_geom_names": [
+    "bfoot",
+    "ffoot"
+  ],
+  "foot_contact": [
+    0.11123333333333332,
+    0.2256
+  ],
+  "actor": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXx4DKgmQXIE9L8Dtx9E1ZTlwp4/actor.pkl"
+}

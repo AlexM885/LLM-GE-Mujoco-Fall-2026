@@ -1,0 +1,2 @@
+mean_reward,std_reward,train_time,param_count,mean_distance,mean_control_cost,timesteps,num_seeds,mean_return_forward,mean_return_ctrl,foot_contact_0,foot_contact_1
+9185.30769623314,520.5133526323209,6032.68764257431,206126,472.20611137575895,0.2588145312820376,100000,3,9444.122227515178,-258.8145312820376,0.0889,0.04773333333333332

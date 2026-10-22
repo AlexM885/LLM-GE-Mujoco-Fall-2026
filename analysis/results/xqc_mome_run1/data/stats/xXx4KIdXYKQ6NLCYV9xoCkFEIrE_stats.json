@@ -1,0 +1,12 @@
+{
+  "gene_id": "xXx4KIdXYKQ6NLCYV9xoCkFEIrE",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXx4KIdXYKQ6NLCYV9xoCkFEIrE",
+  "status": "failed",
+  "error": "invalid gene: ModuleNotFoundError(\"No module named 'torch'\")",
+  "train_time_sec": 0.010309457778930664,
+  "mean_reward": -999999.0
+}

@@ -1,0 +1,12 @@
+{
+  "gene_id": "xXxCRY1ryzmniteJEoVH93GFvdw",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxCRY1ryzmniteJEoVH93GFvdw",
+  "status": "failed",
+  "error": "invalid gene: ValueError('hidden_dims_critic=[8192, 4096, 2048, 1024]: expected 1-8 ints in [1, 4096]')",
+  "train_time_sec": 0.006676197052001953,
+  "mean_reward": -999999.0
+}

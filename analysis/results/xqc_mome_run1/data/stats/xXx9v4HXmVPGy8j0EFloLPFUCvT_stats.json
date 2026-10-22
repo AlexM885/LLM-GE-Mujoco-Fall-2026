@@ -1,0 +1,12 @@
+{
+  "gene_id": "xXx9v4HXmVPGy8j0EFloLPFUCvT",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXx9v4HXmVPGy8j0EFloLPFUCvT",
+  "status": "failed",
+  "error": "invalid gene: ValueError('updates_per_step=1.5: expected an int')",
+  "train_time_sec": 0.007005929946899414,
+  "mean_reward": -999999.0
+}

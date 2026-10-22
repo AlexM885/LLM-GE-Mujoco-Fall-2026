@@ -1,0 +1,12 @@
+{
+  "gene_id": "xXxLDzXDDSTuQ6KwPTZL33pik7o",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxLDzXDDSTuQ6KwPTZL33pik7o",
+  "status": "failed",
+  "error": "invalid gene: SyntaxError('unexpected EOF while parsing', ('/storage/ice1/0/9/swani8/xqc-baseline/repo/sota/XQC/llmge/models/network_xXxLDzXDDSTuQ6KwPTZL33pik7o.py', 72, 13, '        tau=\\n'))",
+  "train_time_sec": 0.005885601043701172,
+  "mean_reward": -999999.0
+}

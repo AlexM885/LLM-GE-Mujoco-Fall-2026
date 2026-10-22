@@ -1,0 +1,12 @@
+{
+  "gene_id": "xXxZlJjS5j8wgmLsub0rFybAyLc",
+  "algo": "xqc",
+  "env": "HalfCheetah-v4",
+  "timesteps": 100000,
+  "num_seeds": 3,
+  "run_dir": "/storage/ice1/0/9/swani8/xqc-baseline/runs/llmge/xXxZlJjS5j8wgmLsub0rFybAyLc",
+  "status": "failed",
+  "error": "invalid gene: TypeError(\"get_xqc_kwargs() missing 1 required positional argument: 'trial'\")",
+  "train_time_sec": 0.006148576736450195,
+  "mean_reward": -999999.0
+}
