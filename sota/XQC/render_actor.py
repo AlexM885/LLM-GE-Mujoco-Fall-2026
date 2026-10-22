@@ -6,9 +6,10 @@ llmge_descriptors.record_videos (same rollout as video_gene.py). The actor comes
 from <run_dir>/actor.pkl (save_actor=true, every gene since the multi-objective
 run) or, for older genes, from the final full checkpoint in <run_dir>/checkpoints.
 
-    python render_actor.py <gene_id> [<gene_id> ...] [-video_steps 300] [-out DIR]
-Run dir: $XQC_RUNS/llmge/<gene_id>.  Output: <out>/<gene_id>/{seed<s>.gif, returns.json}
-(default out: $XQC_RUNS/llmge_render).
+    python render_actor.py <gene_id or run dir> [...] [-video_steps 300] [-out DIR]
+Run dir: $XQC_RUNS/llmge/<gene_id>, or any run dir given as a path (e.g. a
+video_gene.py run).  Output: <out>/<name>/{seed<s>.gif, returns.json}, name = the gene
+id or the run dir's basename (default out: $XQC_RUNS/llmge_render).
 """
 
 import argparse
@@ -56,7 +57,7 @@ def load_actor(agent, run_dir):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("gene_ids", nargs="+")
+    parser.add_argument("gene_ids", nargs="+", help="gene ids or run dir paths")
     parser.add_argument("-video_steps", type=int, default=300)
     parser.add_argument("-out", default=None)
     args = parser.parse_args()
@@ -67,8 +68,9 @@ def main():
     out_root = args.out or os.path.join(runs, "llmge_render")
     from llmge_descriptors import record_videos
 
-    for gene_id in args.gene_ids:
-        run_dir = os.path.join(runs, "llmge", gene_id)
+    for arg in args.gene_ids:
+        run_dir = arg if os.path.isdir(arg) else os.path.join(runs, "llmge", arg)
+        gene_id = os.path.basename(os.path.normpath(run_dir))
         with open(os.path.join(run_dir, "config.json")) as f:
             cfg = json.load(f)
         agent = build_agent(cfg)
