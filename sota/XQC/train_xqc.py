@@ -22,6 +22,7 @@ Usage (Hydra overrides):
 import csv
 import json
 import os
+import pickle
 import random
 import signal
 import sys
@@ -39,7 +40,7 @@ RESUME_MUTABLE_KEYS = {
     "run_dir", "checkpoint_interval", "keep_checkpoints", "max_runtime_s", "resume",
     "eval_interval", "eval_episodes", "log_interval", "log_interval_condition_number",
     "eval_video", "eval_video_fps", "eval_video_frameskip", "eval_video_num_envs", "wandb",
-    "final_descriptors", "final_video", "video_steps",
+    "final_descriptors", "final_video", "video_steps", "final_checkpoint", "save_actor",
 }
 
 EVAL_FIELDS = ["env", "seed", "env_step", "return", "wall_time_s", "slurm_job_id"]
@@ -350,7 +351,17 @@ def main(cfg: DictConfig):
                 save_checkpoint(i)
 
         # Reached max_steps
-        save_checkpoint(last_i)
+        if cfg.get("final_checkpoint", True):
+            save_checkpoint(last_i)
+        if cfg.get("save_actor"):
+            # Enough to replay the policy (render_actor.py); not enough to resume training.
+            import jax
+            actor = {"params": jax.device_get(agent.actor.params),
+                     "batch_stats": jax.device_get(agent.actor.batch_stats),
+                     "env_step": last_i * cfg.env.action_repeat}
+            with open(os.path.join(run_dir, "actor.pkl"), "wb") as f:
+                pickle.dump(actor, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"[actor] wrote {run_dir}/actor.pkl", flush=True)
         if cfg.get("final_descriptors"):
             from llmge_descriptors import rollout_descriptors
             desc = rollout_descriptors(agent, cfg.env.name, cfg.num_seeds, num_episodes=cfg.eval_episodes,
