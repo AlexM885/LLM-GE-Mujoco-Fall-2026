@@ -64,3 +64,4 @@ templates/**/mutant*.sh
 src/mixt.sh 
 hostname.log
 sota/XQC/llmge/stats/
+.scratch
