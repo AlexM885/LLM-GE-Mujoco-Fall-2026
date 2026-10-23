@@ -49,7 +49,8 @@ MUJOCO_ENV_ID = os.getenv("MUJOCO_ENV_ID", ENV_ID)
 #: (<ENV_ID> and <ROBOT_TASK_NOTE> in templates/Mujoco).
 ROBOT_TASK_NOTE = ROBOT_PROFILE["task_note"]
 #: Keep eval runs configurable without changing the shared project environment.
-MUJOCO_EVAL_TIMESTEPS = int(os.getenv("MUJOCO_EVAL_TIMESTEPS", "500000"))
+#: Steps each TD3 gene trains (GENE_TIMESTEPS in run_options.py, the one place to set it).
+MUJOCO_EVAL_TIMESTEPS = GENE_TIMESTEPS["td3"]
 MUJOCO_EVAL_EPISODES = int(os.getenv("MUJOCO_EVAL_EPISODES", "10"))
 MUJOCO_EVAL_MAX_STEPS = int(os.getenv("MUJOCO_EVAL_MAX_STEPS", "1000"))
 #: Environment-step budget of a whole run (TOTAL_TIMESTEPS in run_options.py,
@@ -176,8 +177,10 @@ if SEED == "xqc":
     PROMPTS = f"templates/{DEFAULT_PROMPT_GROUP}/*.txt"
     CONSTANT_RULES_PATH = "templates/Mujoco/XQC_ConstantRules.txt"
     #: Per-individual budget: steps x seeds (seeds train batched in one process).
-    XQC_EVAL_TIMESTEPS = int(os.getenv("XQC_EVAL_TIMESTEPS", "100000"))
-    XQC_EVAL_SEEDS = int(os.getenv("XQC_EVAL_SEEDS", "3"))
+    #: Set in run_options.py (GENE_TIMESTEPS / GENE_TRAIN_SEEDS), so the
+    #: budget charges exactly what the genes train.
+    XQC_EVAL_TIMESTEPS = GENE_TIMESTEPS["xqc"]
+    XQC_EVAL_SEEDS = GENE_TRAIN_SEEDS["xqc"]
     FORBIDDEN_PATTERNS = [
         ("import ", "XQC genes return plain dicts; no imports"),
         ("open(", "file access"),
