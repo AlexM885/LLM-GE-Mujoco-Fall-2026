@@ -154,6 +154,7 @@ def unpackIslands(island_specs, checkpoints) -> list[Island]:
             map_elites_archive = checkpoint.get("MAP_ELITES_ARCHIVE", {})
             map_elites_curiosity = checkpoint.get("MAP_ELITES_CURIOSITY", {})
             map_elites_emitter_history = checkpoint.get("MAP_ELITES_EMITTER_HISTORY", [])
+            vlm_aux_reward_file = checkpoint.get("VLM_AUX_REWARD_FILE")
         else:
             print("Missing Island ", checkpoint_path)
             exit(0)
@@ -164,7 +165,7 @@ def unpackIslands(island_specs, checkpoints) -> list[Island]:
             individuals.append(individual)
         
         island = Island(checkpoint_path, individuals, map_elites_archive, map_elites_curiosity,
-                        map_elites_emitter_history)
+                        map_elites_emitter_history, vlm_aux_reward_file)
         islands.append(island)
     return islands
 
@@ -199,6 +200,7 @@ def packIslands(islands: list[Island], gen: int):
             "MAP_ELITES_ARCHIVE": island.map_elites_archive,
             "MAP_ELITES_CURIOSITY": island.map_elites_curiosity,
             "MAP_ELITES_EMITTER_HISTORY": island.map_elites_emitter_history,
+            "VLM_AUX_REWARD_FILE": island.vlm_aux_reward_file,
         }
         save_checkpoint(gen=gen, folder_name=island_path, global_path=None, checkpoint_data=checkpoint_data)
 

@@ -35,7 +35,8 @@ class Individual:
 
 class Island:
     def __init__(self, path: str, individuals: list[Individual], map_elites_archive: dict = None,
-                 map_elites_curiosity: dict = None, map_elites_emitter_history: list = None):
+                 map_elites_curiosity: dict = None, map_elites_emitter_history: list = None,
+                 vlm_aux_reward_file: str = None):
         self.path = path
         self.individuals = individuals
         # Carried through migration untouched so a MAP-Elites run does not lose
@@ -43,6 +44,7 @@ class Island:
         self.map_elites_archive = map_elites_archive if map_elites_archive is not None else {}
         self.map_elites_curiosity = map_elites_curiosity if map_elites_curiosity is not None else {}
         self.map_elites_emitter_history = map_elites_emitter_history if map_elites_emitter_history is not None else []
+        self.vlm_aux_reward_file = vlm_aux_reward_file
         heapq.heapify(self.individuals)
     
     def remove_best(self) -> Individual:

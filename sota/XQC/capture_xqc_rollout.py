@@ -62,7 +62,7 @@ def build_agent_from_run_dir(run_dir, env_name):
     else:
         cfg = OmegaConf.load(cfg_path)
 
-    env = make_env(env_name, seed=0)
+    env = make_env(env_name, seed=0, aux_reward=False)
     obs_space = env.observation_space
     act_space = env.action_space
     env.close()
@@ -87,7 +87,16 @@ def build_agent_from_run_dir(run_dir, env_name):
     # Find latest checkpoint and load its agent-state leaves.
     ckpt_dir = xqc_ckpt.find_latest(run_dir)
     if ckpt_dir is None:
-        raise FileNotFoundError(f"No complete checkpoint under {run_dir}/checkpoints")
+        # LLM-GE genes keep no checkpoint, only the trained actor (save_actor=true,
+        # as sota/XQC/render_actor.py loads it); the actor is all a rollout needs.
+        actor_path = run_dir / "actor.pkl"
+        if not actor_path.exists():
+            raise FileNotFoundError(f"No complete checkpoint or actor.pkl under {run_dir}")
+        with open(actor_path, "rb") as f:
+            actor = __import__("pickle").load(f)
+        agent.actor = agent.actor.replace(params=actor["params"], batch_stats=actor["batch_stats"])
+        print(f"[capture] loaded actor from {actor_path} (num_seeds={num_seeds})", flush=True)
+        return agent, num_seeds
     with open(Path(ckpt_dir) / "agent.pkl", "rb") as f:
         leaves = __import__("pickle").load(f)
     xqc_ckpt.load_agent_state(agent, leaves)
@@ -139,7 +148,7 @@ def rollout_single_seed(agent, env_name, seed_index, episode_index,
     num_seeds = agent.actor.params["params"]["Dense_0"]["kernel"].shape[0] \
         if "params" in agent.actor.params else len(agent.seeds)
 
-    env = make_env(env_name, seed=reset_seed)
+    env = make_env(env_name, seed=reset_seed, aux_reward=False)
     foot_ids, foot_names = get_foot_geom_ids(env)
 
     obs, reset_info = env.reset(seed=reset_seed)

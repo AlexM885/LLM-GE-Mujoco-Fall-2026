@@ -3,9 +3,14 @@
 Produces the MESB quality and behaviour descriptors:
 
 * quality     ``mean_reward``        mean undiscounted episode return
-* descriptor  ``mean_distance``      mean of (final_x - initial_x) per episode
-* descriptor  ``mean_control_cost``  mean of the per-episode *total* positive
-                                     control cost
+* descriptor  ``foot_contact_<i>``   share of steps foot i touches the ground,
+                                     averaged over episodes (feet are the geoms
+                                     named "*foot*", in geom-id order)
+
+and, recorded alongside but not used by the archive:
+
+* ``mean_distance``      mean of (final_x - initial_x) per episode
+* ``mean_control_cost``  mean of the per-episode *total* positive control cost
 
 Verified for HalfCheetah-v4 (gymnasium 1.2.3, mujoco 3.14):
 
@@ -76,6 +81,31 @@ def _control_cost(env, info: dict, action: np.ndarray) -> tuple[float, str]:
         "refusing to guess a control-cost formula")
 
 
+def foot_geom_ids(env) -> list[int]:
+    """Geom ids of the robot's feet (names containing "foot"), in geom-id order.
+
+    Same rule as sota/MujocoRL/eval.py and sota/XQC/llmge_descriptors.py:
+    Walker2d foot_geom, foot_left_geom; HalfCheetah bfoot, ffoot.
+    """
+    import mujoco
+    model = env.unwrapped.model
+    ids = [g for g in range(model.ngeom)
+           if "foot" in (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or "").lower()]
+    if not ids:
+        raise EvaluationError(f"{env.spec.id} has no geom named '*foot*'")
+    return ids
+
+
+def _feet_in_contact(env, foot_ids: list[int]) -> list[bool]:
+    data = env.unwrapped.data
+    touching = [False] * len(foot_ids)
+    for c in data.contact[:data.ncon]:
+        for i, g in enumerate(foot_ids):
+            if c.geom1 == g or c.geom2 == g:
+                touching[i] = True
+    return touching
+
+
 def model_policy(model) -> PolicyFn:
     """Deterministic policy function from an SB3 model."""
     def act(obs: np.ndarray) -> np.ndarray:
@@ -88,6 +118,8 @@ def run_episode(env, policy: PolicyFn, seed: int, max_steps: int,
                 frame_sink: Callable[[np.ndarray], None] | None = None) -> dict[str, Any]:
     """Roll out one deterministic episode and return its metrics."""
     obs, reset_info = env.reset(seed=int(seed))
+    foot_ids = foot_geom_ids(env)
+    contact_steps = np.zeros(len(foot_ids))
     start_x, x_source = _x_position(env, reset_info)
     end_x = start_x
     total_reward = 0.0
@@ -105,6 +137,7 @@ def run_episode(env, policy: PolicyFn, seed: int, max_steps: int,
         cost, ctrl_source = _control_cost(env, info, np.asarray(action))
         ctrl_total += cost
         end_x, _ = _x_position(env, info)
+        contact_steps += _feet_in_contact(env, foot_ids)
         steps += 1
         if frame_sink is not None:
             frame_sink(env.render())
@@ -115,6 +148,7 @@ def run_episode(env, policy: PolicyFn, seed: int, max_steps: int,
         "control_cost": ctrl_total,
         "control_cost_per_step": ctrl_total / max(steps, 1),
         "length": steps,
+        "foot_contact": (contact_steps / max(steps, 1)).tolist(),
         "initial_x_source": x_source,
         "control_cost_source": ctrl_source,
     }
@@ -138,6 +172,7 @@ def evaluate_policy(policy: PolicyFn, env_id: str = DEFAULT_ENV_ID, num_episodes
     distances = [e["distance"] for e in episodes]
     costs = [e["control_cost"] for e in episodes]
     costs_per_step = [e["control_cost_per_step"] for e in episodes]
+    contact = np.array([e["foot_contact"] for e in episodes])   # episodes x feet
     return {
         "env_id": env_id,
         "mean_reward": float(np.mean(rewards)),
@@ -146,6 +181,8 @@ def evaluate_policy(policy: PolicyFn, env_id: str = DEFAULT_ENV_ID, num_episodes
         "episode_lengths": [e["length"] for e in episodes],
         "eval_seeds": [e["seed"] for e in episodes],
         "behavior": {
+            **{f"foot_contact_{i}": float(contact[:, i].mean()) for i in range(contact.shape[1])},
+            "foot_contacts": contact.tolist(),
             "mean_distance": float(np.mean(distances)),
             "mean_control_cost": float(np.mean(costs)),
             "mean_control_cost_per_step": float(np.mean(costs_per_step)),

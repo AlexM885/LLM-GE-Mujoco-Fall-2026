@@ -19,6 +19,7 @@ from deap.tools import HallOfFame, ParetoFront
 from functools import partial
 from src.utils.print_utils import print_population, print_scores, box_print, print_job_info
 from src.llm_utils import split_file, retrieve_base_code
+from src.step_milestones import append_milestone, due_milestones, milestone_label
 from src.cfg.constants import *
 from src.cfg import constants
 import glob
@@ -61,6 +62,9 @@ MUJOCO_ENV_ID = globals().get("MUJOCO_ENV_ID", "Walker2d-v5")
 ROBOT_TASK_NOTE = globals().get("ROBOT_TASK_NOTE", "")
 # Budget of successfully trained genes for the whole run; 0 disables it.
 MAX_SUCCESSFUL_EVALS = globals().get("MAX_SUCCESSFUL_EVALS", 0)
+# Steps one gene trains, and the interval of results snapshots (run_options.py).
+STEPS_PER_GENE = globals().get("STEPS_PER_GENE", 0)
+MILESTONE_TIMESTEPS = globals().get("MILESTONE_TIMESTEPS", 0)
 
 def count_successful_evals(*stores):
     """Number of distinct genes whose training run finished with a real result.
@@ -498,6 +502,9 @@ def submit_run(gene_id):
     def write_bash_script_py(gene_id, train_file=f'{TRAIN_FILE}'):
         model_file_override = RUNLINE_TMP.format(MODEL, gene_id) 
         python_runline = EVAL_RUNLINE.format(train_file, model_file_override, VARIANT_DIR=VARIANT_DIR)
+        if "aux_reward_shell_prefix" in globals():
+            # This generation's VLM aux reward when the VLM is on; cleared otherwise.
+            python_runline = aux_reward_shell_prefix(VLM_AUX_REWARD_FILE) + python_runline
         config = load_yaml()
         bash_script_content = fill_template_slots(config['python_bash_script'], python_runline)
         return bash_script_content
@@ -1054,6 +1061,7 @@ def save_checkpoint(gen, folder_name="checkpoints", global_path=None, checkpoint
             "hof": hof, 
             "MAP_ELITES_ARCHIVE": MAP_ELITES_ARCHIVE,
             "MAP_ELITES_CURIOSITY": MAP_ELITES_CURIOSITY,
+            "VLM_AUX_REWARD_FILE": VLM_AUX_REWARD_FILE,
             "MAP_ELITES_EMITTER_HISTORY": MAP_ELITES_EMITTER_HISTORY,
         }
     filename = os.path.join(folder_name, f'checkpoint_gen_{gen}.pkl')
@@ -1648,6 +1656,77 @@ def update_archive(population):
           f"({coverage:.1f}% coverage), QD-score(raw) {qd_score:.2f}")
     return updated_genes
 
+def record_milestones(gen, folder_name):
+    """Snapshot the archive at every MILESTONE_TIMESTEPS steps of the budget.
+
+    Appends a row per milestone passed to <folder_name>/milestones.csv and
+    writes the archive at that point to archive_at_<steps>.csv beside it
+    (src/step_milestones.py). Steps are counted over every gene of the run.
+    """
+    if not (USE_MAP_ELITES and MAX_SUCCESSFUL_EVALS and STEPS_PER_GENE and MILESTONE_TIMESTEPS
+            and folder_name):
+        return
+    successful = count_successful_evals(GLOBAL_DATA, GLOBAL_DATA_HIST)
+    steps_used = successful * STEPS_PER_GENE
+    path = os.path.join(folder_name, "milestones.csv")
+    due = due_milestones(steps_used, MAX_SUCCESSFUL_EVALS * STEPS_PER_GENE, MILESTONE_TIMESTEPS, path)
+    if not due:
+        return
+    members = archive_members()
+    rewards = [get_quality(ind) for ind in members]
+    cell_best = [max(get_quality(ind) for ind in (v if MOME else [v])) for v in MAP_ELITES_ARCHIVE.values()]
+    total_cells = MAP_BINS ** len(MAP_ELITES_DESCRIPTORS)
+    names = [name for name, _, _ in MAP_ELITES_DESCRIPTORS]
+    for milestone in due:
+        archive_file = f"archive_at_{milestone_label(milestone)}_steps.csv"
+        with open(os.path.join(folder_name, archive_file), "w") as f:
+            f.write(",".join(["cell", "gene_id", *names, MAP_ELITES_OBJECTIVE]) + "\n")
+            for ind in members:
+                metrics = get_metrics(ind[0]) or {}
+                f.write(",".join([" ".join(map(str, get_bin(ind) or ())), ind[0],
+                                  *[str(metrics.get(n, "")) for n in names],
+                                  str(get_quality(ind))]) + "\n")
+        append_milestone(path, {
+            "milestone_steps": milestone, "steps_used": steps_used,
+            "successful_genes": successful, "generation": gen,
+            "cells": len(MAP_ELITES_ARCHIVE), "total_cells": total_cells,
+            "coverage_pct": round(100.0 * len(MAP_ELITES_ARCHIVE) / total_cells, 3),
+            "qd_score": sum(cell_best), "best_reward": max(rewards, default=""),
+            "mean_elite_reward": (sum(cell_best) / len(cell_best)) if cell_best else "",
+            "archive_file": archive_file,
+        })
+        box_print(f"MILESTONE {milestone:,} STEPS: {len(MAP_ELITES_ARCHIVE)} cells, "
+                  f"QD-score {sum(cell_best):.1f} -> {archive_file}", new_line_end=False)
+
+def vlm_step(gen, folder_name, members):
+    """Let the VLM write the aux reward the next generation trains with.
+
+    Neel's design (src/vlm_loop.py): it watches rollouts of the best and worst
+    of ``members`` and revises its previous reward. Keeps the previous file
+    if anything fails. No-op unless the VLM run option is on.
+    """
+    global VLM_AUX_REWARD_FILE
+    if not globals().get("USE_VLM", False) or not folder_name:
+        return
+    from src import vlm_loop
+    ranked = []
+    for ind in members:
+        quality = get_quality(ind)
+        if np.isfinite(quality) and quality > FAILED_EVAL_SENTINEL:
+            ranked.append((ind[0], float(quality)))
+    if SEED == "xqc":
+        def model_path(gene_id):
+            return os.path.join(vlm_loop.xqc_runs_root(), "llmge", gene_id)
+    else:
+        def model_path(gene_id):
+            # train_rl.py / train_rl_vlm.py default -model_dir, run from the repo root.
+            return os.path.join(ROOT_DIR, "sota", "MujocoRL", "trained_models", f"{gene_id}.zip")
+    VLM_AUX_REWARD_FILE = vlm_loop.refresh_aux_reward(
+        generation=gen, ranked=ranked, model_path=model_path, kind=SEED,
+        out_dir=os.path.abspath(os.path.join(folder_name, "vlm")),
+        previous_file=VLM_AUX_REWARD_FILE,
+        archive_cells=len(MAP_ELITES_ARCHIVE) if USE_MAP_ELITES else None, local=LOCAL)
+
 def create_population(n, llm_model):
     individual_func = partial(toolbox.individual, llm_model=llm_model)
     return tools.initRepeat(list, individual_func, n)
@@ -1679,6 +1758,9 @@ MAP_ELITES_ARCHIVE = {}
 MAP_ELITES_CURIOSITY = {}
 # One entry per generation: archive state, emitter allocation and success rates.
 MAP_ELITES_EMITTER_HISTORY = []
+# The VLM aux-reward file the next generation trains with (VLM option); None
+# until the VLM has watched a generation, so generation 0 trains unshaped.
+VLM_AUX_REWARD_FILE = None
 
 # Main Evolution Loop
 if __name__ == "__main__":
@@ -1725,6 +1807,7 @@ if __name__ == "__main__":
         MAP_ELITES_ARCHIVE = population_data.get("MAP_ELITES_ARCHIVE", {})
         MAP_ELITES_CURIOSITY = population_data.get("MAP_ELITES_CURIOSITY", {})
         MAP_ELITES_EMITTER_HISTORY = population_data.get("MAP_ELITES_EMITTER_HISTORY", [])
+        VLM_AUX_REWARD_FILE = population_data.get("VLM_AUX_REWARD_FILE")
         # GLOBAL_DATA only holds the last generation's genes, and the history can
         # hold stale invalid entries for older elites. The checkpointed fitness is
         # authoritative: record it so the fitness reset below restores it instead
@@ -1752,8 +1835,18 @@ if __name__ == "__main__":
     if USE_MAP_ELITES:
         box_print("SEEDING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
         update_archive(population)
+    if not population_data:
+        vlm_step(0, args.checkpoints, archive_members() if USE_MAP_ELITES else population)
     # Evolution
-    for gen in range(start_gen, num_generations if migration_gen == 0 else ((start_gen + migration_gen - 1) // migration_gen) * migration_gen + 1):
+    if migration_gen != 0:
+        # Up to the next migration; islands_wrapper.py then migrates and relaunches.
+        generations = range(start_gen, ((start_gen + migration_gen - 1) // migration_gen) * migration_gen + 1)
+    elif MAX_SUCCESSFUL_EVALS:
+        # With a step budget the run ends when the budget is spent.
+        generations = itertools.count(start_gen)
+    else:
+        generations = range(start_gen, num_generations)
+    for gen in generations:
         GEN_COUNT = gen
         if MAX_SUCCESSFUL_EVALS:
             successful_evals = count_successful_evals(GLOBAL_DATA, GLOBAL_DATA_HIST)
@@ -1927,6 +2020,8 @@ if __name__ == "__main__":
         print_scores(population, FITNESS_WEIGHTS)
         hof.update(population)
         save_checkpoint(gen, folder_name=args.checkpoints, global_path=args.global_path)
+        record_milestones(gen, args.checkpoints)
+        vlm_step(gen, args.checkpoints, archive_members() if USE_MAP_ELITES else population)
         if MOME:
             write_archive_csv(gen, args.checkpoints)
         LINKED_GENES = {}

@@ -55,7 +55,9 @@ from sota.MujocoRL.mesb_logging import (EVALUATION_COLUMNS, METRIC_COLUMNS, RunP
                                         append_csv, append_jsonl, boundary_record,
                                         evaluation_row, truncate_after_generation,
                                         write_snapshot)
-from sota.MujocoRL.results_io import EvaluationOutcome, read_outcome  # noqa: E402
+from sota.MujocoRL.results_io import DESCRIPTOR_KEYS, EvaluationOutcome, read_outcome  # noqa: E402
+from src.cfg import run_options  # noqa: E402
+from src.step_milestones import append_milestone, due_milestones  # noqa: E402
 
 SELECTION_MODES = ("nsga2", "mesb-shadow", "mesb")
 CHECKPOINT_FORMAT = "mesb-run-v1"
@@ -200,6 +202,8 @@ class MESBRun:
         self.next_eval_index = 0
         self.remap_events_written = 0
         self.start_generation = 0
+        # VLM option: the aux-reward file the next generation trains with.
+        self.vlm_aux_reward_file: str | None = None
 
     # ---------------------------------------------------------- setup
     def _new_archive(self) -> SlidingBoundariesArchive:
@@ -240,7 +244,7 @@ class MESBRun:
             "git_branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
             "git_dirty": bool(_git("status", "--porcelain")),
             "objective": "mean_reward",
-            "descriptors": ["mean_distance", "mean_control_cost"],
+            "descriptors": list(DESCRIPTOR_KEYS),
             "archive_seed": self.cfg["seed"],
             "llm": {"backend": self.cfg["llm_backend"], "llm_model": self.cfg["llm_model"],
                     **_llm_identity()},
@@ -278,6 +282,7 @@ class MESBRun:
             "remap_events_written": self.remap_events_written,
             "archive_state": None if self.archive is None else self.archive.state_dict(),
             "rng_state": _rng_state(),
+            "vlm_aux_reward_file": self.vlm_aux_reward_file,
         }
         _atomic_pickle(self.paths.checkpoint(generation), state)
 
@@ -305,12 +310,54 @@ class MESBRun:
         _set_rng_state(state["rng_state"])
         self.outcomes = {g: read_outcome(self.paths.result_json(g), g) for g in self.registry}
         self.start_generation = state["generation"] + 1
+        self.vlm_aux_reward_file = state.get("vlm_aux_reward_file")
         truncate_after_generation(self.paths, state["generation"])
         print(f"Resumed from {path.name}: generation {state['generation']} complete, "
               f"{len(self.registry)} evaluations, archive "
               f"{'-' if self.archive is None else self.archive.num_elites} elites", flush=True)
 
     # ---------------------------------------------------------- planning
+    # ---------------------------------------------------------- step budget
+    @property
+    def steps_per_gene(self) -> int:
+        """Environment steps one gene trains (all of its seeds)."""
+        return int(self.cfg["eval_timesteps"]) * int(self.cfg["eval_num_seeds"])
+
+    @property
+    def budget_genes(self) -> int:
+        """Successful genes the step budget pays for; 0 = no budget."""
+        total = int(self.cfg.get("total_timesteps") or 0)
+        return total // self.steps_per_gene if total else 0
+
+    def successful_genes(self) -> int:
+        return sum(1 for o in self.outcomes.values() if o.ok)
+
+    def _record_milestones(self, generation: int) -> None:
+        """Row in milestones.csv at every milestone_timesteps of the budget."""
+        interval = int(self.cfg.get("milestone_timesteps") or 0)
+        if not (self.budget_genes and interval):
+            return
+        successful = self.successful_genes()
+        steps_used = successful * self.steps_per_gene
+        path = self.paths.run_dir / "milestones.csv"
+        due = due_milestones(steps_used, self.budget_genes * self.steps_per_gene, interval, str(path))
+        if not due:
+            return
+        s = self.archive.summary() if self.archive is not None else {}
+        for milestone in due:
+            append_milestone(str(path), {
+                "milestone_steps": milestone, "steps_used": steps_used,
+                "successful_genes": successful, "generation": generation,
+                "cells": s.get("occupied_cells"), "total_cells": s.get("total_cells"),
+                "coverage_pct": None if not s else round(100 * s["coverage"], 3),
+                "qd_score": s.get("raw_qd_score"), "best_reward": s.get("best_objective"),
+                "mean_elite_reward": s.get("mean_elite_objective"),
+                # The archive of this generation, written by write_snapshot.
+                "archive_file": f"snapshots/gen_{generation:04d}.json",
+            })
+            print(f"[gen {generation}] milestone {milestone:,} steps: "
+                  f"{s.get('occupied_cells')} cells, QD {s.get('raw_qd_score')}", flush=True)
+
     def _train_seed(self) -> int:
         seed = (self.cfg["seed"] * 1_000_000 + self.next_eval_index) % (2 ** 31 - 1)
         self.next_eval_index += 1
@@ -334,11 +381,16 @@ class MESBRun:
             slots, results = vary(parents, self.variation, self.cfg["crossover_probability"],
                                   self.cfg["mutation_probability"])
         by_id = {r.gene_id: r for r in results}
+        # Train no more genes than the step budget has left (failed genes are
+        # not charged, so the last generation may finish a little under it).
+        remaining = (self.budget_genes - self.successful_genes()) if self.budget_genes else None
         new_genes, seen = [], set(self.registry)
         for gid in slots:
             if gid in seen:
                 continue  # unchanged clone of an already evaluated gene
             seen.add(gid)
+            if remaining is not None and len(new_genes) >= remaining:
+                break
             r = by_id[gid]
             new_genes.append({"gene_id": gid, "operator": r.operator, "parents": r.parents,
                               "train_seed": self._train_seed()})
@@ -422,7 +474,35 @@ class MESBRun:
             self.population = offspring
         self._update_hof()
         self._log_generation(generation, plan, adds, time.time() - t0)
+        self._vlm_step(generation)
         self.save_checkpoint(generation)
+
+    def _vlm_step(self, generation: int) -> None:
+        """VLM option: let the VLM write the next generation's aux reward.
+
+        Neel's design (src/vlm_loop.py): it watches rollouts of the best and
+        worst of the current population (the archive elites in mesb mode) and
+        revises its previous reward. The gene trainers read the file from the
+        environment they inherit from this process.
+        """
+        if not run_options.USE_VLM:
+            return
+        from src import vlm_loop
+        ranked = [(g, float(self.outcomes[g].payload["mean_reward"])) for g in self.population
+                  if g in self.outcomes and self.outcomes[g].ok]
+        kind = "xqc" if self.cfg["algo"] == "xqc" else "td3"
+        models = self.paths.models
+
+        def model_path(gene_id: str) -> str:
+            # train_gene.py saves <models>/<gene>.zip; train_gene_xqc.py runs in <models>/<gene>.
+            return str(models / gene_id) if kind == "xqc" else str(models / f"{gene_id}.zip")
+
+        self.vlm_aux_reward_file = vlm_loop.refresh_aux_reward(
+            generation=generation, ranked=ranked, model_path=model_path, kind=kind,
+            out_dir=str((self.paths.run_dir / "vlm").resolve()),
+            previous_file=self.vlm_aux_reward_file,
+            archive_cells=None if self.archive is None else self.archive.num_elites)
+        run_options.apply_aux_reward_env(self.vlm_aux_reward_file)
 
     def _update_hof(self) -> None:
         ok = [g for g, o in self.outcomes.items() if o.ok]
@@ -472,6 +552,7 @@ class MESBRun:
             self.remap_events_written = len(self.archive.remap_events)
             write_snapshot(self.paths, self.archive, generation)
         append_csv(self.paths.metrics_csv, METRIC_COLUMNS, [metrics])
+        self._record_milestones(generation)
 
         msg = (f"[gen {generation}] done in {seconds:.0f}s: {len(plan.new_genes)} new, "
                f"{metrics['successful_evaluations']}/{metrics['total_evaluations']} ok overall, "
@@ -508,8 +589,20 @@ class MESBRun:
             self.load_checkpoint(ckpt)
         elif resume:
             truncate_after_generation(self.paths, -1)
-        for generation in range(self.start_generation, self.cfg["num_generations"] + 1):
+        # VLM option: the gene trainers read LLMGE_AUX_REWARD_CACHE from the
+        # environment they inherit from this process.
+        run_options.apply_aux_reward_env(self.vlm_aux_reward_file)
+        cap = self.cfg.get("num_generations")
+        if cap is None and not self.budget_genes:
+            cap = C.NUM_GENERATIONS
+        generation = self.start_generation
+        while cap is None or generation <= cap:
+            if self.budget_genes and self.successful_genes() >= self.budget_genes:
+                print(f"Step budget spent: {self.successful_genes()} genes x "
+                      f"{self.steps_per_gene:,} steps", flush=True)
+                break
             self.run_generation(generation)
+            generation += 1
         print(f"Run complete: {self.paths.run_dir}\n"
               f"  analyse with: python sota/MujocoRL/analyze_mesb.py --run-dir {self.paths.run_dir}",
               flush=True)
@@ -584,7 +677,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Extra sbatch flags for per-gene jobs (--evaluator slurm)")
 
     g = p.add_argument_group("evolution")
-    g.add_argument("--num-generations", type=int, default=C.NUM_GENERATIONS)
+    g.add_argument("--num-generations", type=int, default=None,
+                   help="Optional cap on generations; by default the run ends when "
+                        "--total-timesteps is spent")
+    g.add_argument("--total-timesteps", type=int, default=C.TOTAL_TIMESTEPS,
+                   help="Step budget of the run (MUJOCO_TOTAL_TIMESTEPS); 0 = no budget")
+    g.add_argument("--milestone-timesteps", type=int, default=C.MILESTONE_TIMESTEPS,
+                   help="milestones.csv row every this many steps (LLMGE_MILESTONE_TIMESTEPS)")
     g.add_argument("--start-population-size", type=int, default=C.START_POPULATION_SIZE)
     g.add_argument("--population-size", type=int, default=C.POPULATION_SIZE)
     g.add_argument("--num-elites", type=int, default=C.NUM_ELITES)
@@ -620,8 +719,8 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit(f"--evaluator slurm has no job script for --algo {args.algo}")
     if args.archive_boundaries == "fixed":
         if args.fixed_ranges is None:
-            raise SystemExit("--archive-boundaries fixed needs --fixed-ranges DIST_LO DIST_HI "
-                             "CTRL_LO CTRL_HI")
+            raise SystemExit("--archive-boundaries fixed needs --fixed-ranges X_LO X_HI "
+                             "Y_LO Y_HI (foot_contact_0, then foot_contact_1)")
         r = args.fixed_ranges
         cfg["fixed_ranges"] = [[r[0], r[1]], [r[2], r[3]]]
     elif args.fixed_ranges is not None:

@@ -52,12 +52,11 @@ ROBOT_TASK_NOTE = ROBOT_PROFILE["task_note"]
 MUJOCO_EVAL_TIMESTEPS = int(os.getenv("MUJOCO_EVAL_TIMESTEPS", "500000"))
 MUJOCO_EVAL_EPISODES = int(os.getenv("MUJOCO_EVAL_EPISODES", "10"))
 MUJOCO_EVAL_MAX_STEPS = int(os.getenv("MUJOCO_EVAL_MAX_STEPS", "1000"))
-#: Environment-step budget of a whole run, matched by --max_timesteps of the
-#: PGA-MAP-Elites baseline. Only genes that trained successfully are charged,
-#: MUJOCO_EVAL_TIMESTEPS each, so the run ends after MAX_SUCCESSFUL_EVALS of
-#: them rather than after num_generations. Set to 0 to disable the budget.
-MUJOCO_TOTAL_TIMESTEPS = int(os.getenv("MUJOCO_TOTAL_TIMESTEPS", "96000000"))
-MAX_SUCCESSFUL_EVALS = MUJOCO_TOTAL_TIMESTEPS // MUJOCO_EVAL_TIMESTEPS
+#: Environment-step budget of a whole run (TOTAL_TIMESTEPS in run_options.py,
+#: shared with run_mesb.py). Only genes that trained successfully are charged,
+#: STEPS_PER_GENE each, so the run ends after MAX_SUCCESSFUL_EVALS of them
+#: rather than after num_generations. 0 disables the budget.
+MUJOCO_TOTAL_TIMESTEPS = TOTAL_TIMESTEPS
 
 #: Output directory for intermediate generation data
 OUTPUT_DIR = "mujoco_rl_output"
@@ -197,6 +196,16 @@ if SEED == "xqc":
     )
     # Counted from submission, so it includes queue time.
     EVAL_NO_PROGRESS_TIMEOUT_SECONDS = int(os.getenv("LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS", str(6 * 60 * 60)))
+elif USE_VLM:
+    #: Same contract and results file as train_rl.py; trains on the
+    #: generation's VLM-shaped reward and evaluates on the plain one.
+    TRAIN_FILE = "sota/MujocoRL/train_rl_vlm.py"
+#: run_improved.py puts aux_reward_shell_prefix(<this generation's VLM file>)
+#: in front of EVAL_RUNLINE for every evaluation job: it sets the aux-reward
+#: variables when the VLM is on and clears them otherwise.
+#: Run budget in genes: TOTAL_TIMESTEPS over what one gene of this seed trains
+#: (STEPS_PER_GENE in run_options.py: 500k for TD3, 100k x 3 seeds for XQC).
+MAX_SUCCESSFUL_EVALS = TOTAL_TIMESTEPS // STEPS_PER_GENE if TOTAL_TIMESTEPS else 0
 
 #: LLM GPU constraint string for SLURM
 LLM_GPU = 'nvidia-gpu'

@@ -93,6 +93,21 @@ def build_td3(module, policy_class, policy_kwargs, env, args):
     return model, int(sum(p.numel() for p in model.actor.parameters()))
 
 
+def wrap_vlm_aux_reward(env):
+    """Add the run's VLM aux reward to a training env if LLMGE_AUX_REWARD_CACHE is set.
+
+    Same loader and wrapper as Neel's train_rl_vlm.py; any problem with the
+    file falls back to the plain env there, and so here.
+    """
+    from train_rl_vlm import AUX_CACHE_ENV, AuxRewardWrapper, _load_aux_reward_cache
+    aux = _load_aux_reward_cache(os.environ.get(AUX_CACHE_ENV))
+    if aux is None:
+        return env
+    print(f"VLM aux reward active: lam={aux['lam']}", flush=True)
+    return AuxRewardWrapper(env, aux["fn"], lam=aux["lam"], anneal_steps=aux["anneal_steps"],
+                            center=aux["center"], pbrs=aux["pbrs"], pbrs_gamma=aux["pbrs_gamma"])
+
+
 def run(args: argparse.Namespace) -> dict:
     start = time.time()
     base = {
@@ -120,6 +135,9 @@ def run(args: argparse.Namespace) -> dict:
         stage = "build_model"
         seed_everything(args.seed)
         env = make_env(args.env)
+        # VLM option: the run's aux reward shapes the training env only;
+        # evaluate_policy below builds its own plain env for the fitness.
+        env = wrap_vlm_aux_reward(env)
         if base["algorithm"] == "TD3":
             model, param_count = build_td3(module, policy_class, policy_kwargs, env, args)
         else:

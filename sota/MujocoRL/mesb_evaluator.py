@@ -247,6 +247,7 @@ class MockEvaluator(_BaseEvaluator):
         distance = float(rng.lognormal(mean=5.0, sigma=0.8) - 60.0)
         control = float(rng.gamma(shape=2.0, scale=60.0))
         reward = distance - 0.1 * control + float(rng.normal(0, 20))
+        contact = [float(rng.beta(2.0, 2.0)), float(rng.beta(2.0, 2.0))]
         n = self.settings.episodes
         payload = {
             "schema_version": SCHEMA_VERSION, "gene_id": job.gene_id, "status": "success",
@@ -256,7 +257,8 @@ class MockEvaluator(_BaseEvaluator):
             "max_eval_steps": self.settings.max_steps, "train_time_sec": 0.0,
             "mean_reward": reward, "std_reward": 0.0, "param_count": 1000 + len(code),
             "model_path": None, "rewards": [reward] * n,
-            "behavior": {"mean_distance": distance, "mean_control_cost": control,
+            "behavior": {"foot_contact_0": contact[0], "foot_contact_1": contact[1],
+                         "mean_distance": distance, "mean_control_cost": control,
                          "mean_control_cost_per_step": control / self.settings.max_steps,
                          "distances": [distance] * n, "control_costs": [control] * n},
         }

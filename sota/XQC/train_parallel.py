@@ -50,7 +50,8 @@ def main(cfg: DictConfig):
                 action_repeat=cfg.env.action_repeat,
             )
             env = make_envs(seed=cfg.seed)
-            eval_env = make_envs(seed=cfg.seed + 42)
+            # Evaluation sees the plain reward, never the VLM aux bonus.
+            eval_env = make_envs(seed=cfg.seed + 42, aux_reward=False)
 
             agent_kwargs = OmegaConf.to_container(cfg.agent, resolve=True)
             agent_kwargs.update({

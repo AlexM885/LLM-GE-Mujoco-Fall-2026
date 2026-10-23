@@ -13,8 +13,8 @@ Writes to ``<run-dir>/mesb/figures/`` (or ``--out-dir``):
     final_archive.png                 elites on the *actual* (unequal) MESB cells
     snapshots/archive_gen_XXXX.png    the same, per generation
     coverage.png, qd_score.png, best_reward.png, mean_elite_reward.png
-    boundaries_mean_distance.png      every boundary position over time
-    boundaries_mean_control_cost.png
+    boundaries_foot_contact_0.png     every boundary position over time
+    boundaries_foot_contact_1.png
     descriptor_distributions.png      histograms with final boundaries overlaid
     fixed_vs_sliding.png              (only with --compare-fixed)
     summary.md
@@ -45,9 +45,9 @@ if str(REPO_ROOT) not in sys.path:
 from sota.MujocoRL.mesb_archive import (ArchiveRecord, FixedGridArchive,  # noqa: E402
                                         SlidingBoundariesArchive)
 
-X_KEY, Y_KEY = "mean_distance", "mean_control_cost"
-X_LABEL = "mean distance traveled (final x - initial x)"
-Y_LABEL = "mean control cost per episode"
+X_KEY, Y_KEY = "foot_contact_0", "foot_contact_1"
+X_LABEL = "foot 0 contact (share of steps on the ground)"
+Y_LABEL = "foot 1 contact (share of steps on the ground)"
 
 
 # ------------------------------------------------------------------ loading
@@ -104,9 +104,9 @@ def plot_archive(snapshot: dict, evaluations: list[dict], path: Path, vmin=None,
     if rewards:
         vmin = min(rewards) if vmin is None else vmin
         vmax = max(rewards) if vmax is None else vmax
-        rects = [Rectangle((e["distance_lo"], e["control_cost_lo"]),
-                           e["distance_hi"] - e["distance_lo"],
-                           e["control_cost_hi"] - e["control_cost_lo"]) for e in elites]
+        rects = [Rectangle((e[f"{X_KEY}_lo"], e[f"{Y_KEY}_lo"]),
+                           e[f"{X_KEY}_hi"] - e[f"{X_KEY}_lo"],
+                           e[f"{Y_KEY}_hi"] - e[f"{Y_KEY}_lo"]) for e in elites]
         pc = PatchCollection(rects, cmap="viridis", alpha=0.85, edgecolor="none", zorder=2)
         pc.set_array(np.array(rewards))
         pc.set_clim(vmin, vmax if vmax > vmin else vmin + 1e-9)
@@ -292,13 +292,13 @@ def write_summary(run: dict, figures: list[str], replay_result: dict | None, pat
             f"| mean elite reward | {_f(s['mean_elite_objective'])} |",
             f"| best reward | {_f(s['best_objective'])} |",
             f"| best gene ID | `{s['best_gene_id']}` |",
-            f"| best gene descriptor (distance, control cost) | "
+            f"| best gene descriptor (foot 0 contact, foot 1 contact) | "
             f"({_f(best[X_KEY] if best else None)}, {_f(best[Y_KEY] if best else None)}) |",
             f"| remaps | {s['num_remaps']} |",
             f"| best model | `{best_model_path(run)}` |", "",
             "## Final boundaries", "",
-            f"- distance: {[round(b, 3) for b in final['boundaries'][X_KEY]]}",
-            f"- control cost: {[round(b, 3) for b in final['boundaries'][Y_KEY]]}",
+            f"- foot 0 contact: {[round(b, 3) for b in final['boundaries'][X_KEY]]}",
+            f"- foot 1 contact: {[round(b, 3) for b in final['boundaries'][Y_KEY]]}",
         ]
     else:
         best = max(ok, key=lambda e: float(e["mean_reward"]), default=None)
@@ -374,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
                              ("mean_elite_reward", "mean elite reward", "mean_elite_reward.png")):
         if plot_curve(run["metrics"], key, label, out / name):
             made.append(name)
-    for key, label in ((X_KEY, "distance"), (Y_KEY, "control cost")):
+    for key, label in ((X_KEY, "foot 0 contact"), (Y_KEY, "foot 1 contact")):
         name = f"boundaries_{key}.png"
         if plot_boundary_evolution(run["boundaries"], key, label, out / name):
             made.append(name)

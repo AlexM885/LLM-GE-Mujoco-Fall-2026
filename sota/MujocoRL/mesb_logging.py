@@ -30,7 +30,7 @@ from sota.MujocoRL.results_io import DESCRIPTOR_KEYS, EvaluationOutcome
 
 EVALUATION_COLUMNS = [
     "gene_id", "generation", "status", "mean_reward", "std_reward", "param_count",
-    "mean_distance", "mean_control_cost", "mean_control_cost_per_step",
+    *DESCRIPTOR_KEYS, "mean_distance", "mean_control_cost", "mean_control_cost_per_step",
     "archive_cell_x", "archive_cell_y", "inserted", "replaced_gene_id", "model_path",
     "train_seed", "operator", "parents", "error",
 ]
@@ -44,9 +44,9 @@ METRIC_COLUMNS = [
 ]
 
 ARCHIVE_COLUMNS = [
-    "cell_x", "cell_y", "gene_id", "generation", "mean_reward", "mean_distance",
-    "mean_control_cost", "param_count", "model_path",
-    "distance_lo", "distance_hi", "control_cost_lo", "control_cost_hi",
+    "cell_x", "cell_y", "gene_id", "generation", "mean_reward", *DESCRIPTOR_KEYS,
+    "param_count", "model_path",
+    *(f"{k}_{edge}" for k in DESCRIPTOR_KEYS for edge in ("lo", "hi")),
 ]
 
 
@@ -163,6 +163,7 @@ def evaluation_row(outcome: EvaluationOutcome, generation: int, add: AddResult |
         "mean_reward": p.get("mean_reward") if outcome.ok else None,
         "std_reward": p.get("std_reward") if outcome.ok else None,
         "param_count": p.get("param_count") if outcome.ok else None,
+        **{k: (b.get(k) if outcome.ok else None) for k in DESCRIPTOR_KEYS},
         "mean_distance": b.get("mean_distance") if outcome.ok else None,
         "mean_control_cost": b.get("mean_control_cost") if outcome.ok else None,
         "mean_control_cost_per_step": b.get("mean_control_cost_per_step") if outcome.ok else None,
@@ -195,10 +196,11 @@ def archive_rows(archive: SlidingBoundariesArchive) -> list[dict[str, Any]]:
         rows.append({
             "cell_x": cell[0], "cell_y": cell[1], "gene_id": r.gene_id,
             "generation": r.generation, "mean_reward": r.objective,
-            "mean_distance": r.measures[0], "mean_control_cost": r.measures[1],
+            **dict(zip(DESCRIPTOR_KEYS, r.measures)),
             "param_count": r.param_count, "model_path": r.model_path,
-            "distance_lo": b[0][cell[0]], "distance_hi": b[0][cell[0] + 1],
-            "control_cost_lo": b[1][cell[1]], "control_cost_hi": b[1][cell[1] + 1],
+            **{f"{k}_{edge}": b[axis][cell[axis] + offset]
+               for axis, k in enumerate(DESCRIPTOR_KEYS)
+               for edge, offset in (("lo", 0), ("hi", 1))},
         })
     return rows
 

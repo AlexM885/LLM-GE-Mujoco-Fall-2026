@@ -83,7 +83,9 @@ def xqc_command(args, overrides, python=sys.executable):
             "eval_episodes={}".format(args.eval_episodes),
             "start_training={}".format(min(5000, args.timesteps // 2)),
             "run_dir={}".format(args.run_dir), "checkpoint_interval=0",
-            "save_replay_buffer=false", "final_descriptors=true", "resume=never"] + list(overrides)
+            "save_replay_buffer=false", "final_descriptors=true", "resume=never",
+            # Keep the trained actor (~1 MB): the VLM option films it.
+            "save_actor=true"] + list(overrides)
 
 
 def _tail(path, n=40):
@@ -112,7 +114,8 @@ def payload_from_descriptors(desc, args, train_time, config):
     ctrl_total = [c * args.max_steps for c in ctrl_per_step]
     mean_reward = _mean(per_seed)
     values = [mean_reward, _pstd(per_seed), float(desc["mean_distance"]),
-              float(desc["mean_control_cost"])]
+              float(desc["mean_control_cost"]), float(desc["foot_contact_0"]),
+              float(desc["foot_contact_1"])]
     if not all(math.isfinite(v) for v in values):
         raise ValueError("non-finite metric in descriptors.json: {}".format(values))
     return {
@@ -129,6 +132,9 @@ def payload_from_descriptors(desc, args, train_time, config):
         "model_path": os.path.abspath(args.run_dir), "rewards": returns,
         "xqc_config": config,
         "behavior": {
+            # The archive descriptors (results_io.DESCRIPTOR_KEYS).
+            "foot_contact_0": float(desc["foot_contact_0"]),
+            "foot_contact_1": float(desc["foot_contact_1"]),
             "mean_distance": float(desc["mean_distance"]),
             "mean_control_cost": float(desc["mean_control_cost"]) * args.max_steps,
             "mean_control_cost_per_step": float(desc["mean_control_cost"]),

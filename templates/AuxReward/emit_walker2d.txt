@@ -1,0 +1,155 @@
+<<ROLE_PREAMBLE>>
+
+You are producing a short auxiliary reward function that will shape the
+training reward of a Walker2d-v5 policy during off-policy (TD3 / XQC)
+learning. The policy's EVALUATION reward is unchanged: the auxiliary term
+can only accelerate or guide learning, never inflate the reported fitness.
+Your output will be executed inside a strict sandbox (whitelisted numpy +
+arithmetic only).
+
+Walker2d-v5 observation (17 floats, deterministic indices):
+  obs[0]   z-coordinate of the torso (HEIGHT; ~1.25 standing; the episode
+           ENDS if it leaves [0.8, 2.0])
+  obs[1]   angle of the torso (body pitch; the episode ENDS if it leaves [-1, 1])
+  obs[2]   angle of the right thigh joint
+  obs[3]   angle of the right leg (knee) joint
+  obs[4]   angle of the right foot joint
+  obs[5]   angle of the left thigh joint
+  obs[6]   angle of the left leg (knee) joint
+  obs[7]   angle of the left foot joint
+  obs[8]   x-velocity of the torso (FORWARD VELOCITY — base reward tracks this)
+  obs[9]   z-velocity of the torso (vertical)
+  obs[10]  angular velocity of the torso (body pitch rate)
+  obs[11:14] angular velocities of the right thigh, leg, foot joints
+  obs[14:17] angular velocities of the left thigh, leg, foot joints
+
+Action (6 floats, each in [-1, 1]):
+  action[0:3] right-leg torques (thigh, leg, foot)
+  action[3:6] left-leg torques (thigh, leg, foot)
+
+info dict available each step:
+  info["reward_forward"]  per-step forward velocity reward
+  info["reward_survive"]  per-step healthy reward (1 while upright)
+  info["reward_ctrl"]     per-step torque cost (negative)
+  info["x_position"]      current torso x position
+  info["x_velocity"]      forward velocity (same as obs[8])
+
+Base Walker2d reward already contains forward velocity + 1 per step while
+healthy (torso height in [0.8, 2.0] and pitch in [-1, 1]) - 0.001 *
+squared torque, and an unhealthy step ENDS the episode, so falling over
+is the main way a policy loses return. Your aux_reward should contribute
+a DIFFERENT, orthogonal signal that the base reward does NOT already
+encode --- e.g. gait regularity, torso-pitch stability, left-right leg
+alternation, stride period, posture smoothness, energy-per-distance. Do
+NOT duplicate the base reward (forward velocity, the healthy bonus or
+torque cost).
+
+STRONG PREFERENCE: write the aux_reward as a BONUS (positive values when
+the policy is doing the right thing), not a PENALTY (negative values
+scaled by the degree of a failure). A pure penalty like
+``-float(np.square(obs[10]))`` creates a local optimum where the policy
+can minimise the penalty by not moving --- we have measured this failure
+mode on Walker2d-v5 TD3 under this exact setup. A bounded bonus like
+``float(np.exp(-np.square(obs[10])))`` (which is 1 when the pitch rate
+is zero and decays smoothly as it grows) has the same shaping gradient
+at small values of the quantity being shaped, but is never worse than
+returning zero, so it cannot create a stand-still trap. When in doubt,
+convert ``-f(x)`` into ``np.exp(-f(x))`` or a clipped
+``max(0.0, 1.0 - f(x))`` form.
+
+AUX INGREDIENT GUIDANCE (Walker2d-v5)
+
+Avoid:
+- Anything that rewards a LOW torso: obs[0] is the height, and below 0.8
+  the episode ends. Never use a form like exp(-|obs[0]|).
+- Any penalty-form (``-f(x)``) — see stand-still trap note above.
+- Rewarding standing still: the healthy bonus already pays for staying
+  up, so a bonus that peaks at zero velocity teaches the walker to stand.
+
+Prefer these ingredient families instead:
+- Forward progress Φ(s), e.g.
+    def aux_reward(obs, action, info):
+        v = float(info["x_velocity"])
+        return float(np.tanh(v / 4.0))
+  — a saturating forward-velocity bonus, bounded in [-1, 1]. Under
+  centering + PBRS wrapping this becomes γ·Φ(s')−Φ(s) which is a credit-
+  assignment signal aligned with the base reward (Ng, Harada, Russell
+  1999 Theorem 1: this preserves the optimal policy).
+- Upright-torso bonus: ``np.exp(-np.square(obs[1]))`` peaks with the torso
+  level, which keeps the walker away from the pitch limit that ends the
+  episode, while the base reward still pays for moving forward.
+- Stride-rhythm bonus: reward out-of-phase right/left thigh angles, e.g.
+  ``np.sin(obs[2] - obs[5])`` or ``np.abs(obs[2] - obs[5])``, which encodes
+  the alternating leg phase of walking.
+
+GENERATION CONTEXT
+<<GEN_CONTEXT>>
+
+PARENT BEHAVIOUR CONTRAST
+Top-performing parents in this generation:
+<<TOP_PARENTS>>
+
+Bottom-performing parents in this generation:
+<<BOTTOM_PARENTS>>
+
+<<REFLECTION_BLOCK>>
+
+SANDBOX RULES (strict; snippet is rejected on any violation)
+- Exactly one top-level function with the signature
+    def aux_reward(obs, action, info):
+- You may use: ``np`` (numpy) with any of
+    np.sum, np.mean, np.abs, np.sqrt, np.square, np.clip, np.maximum,
+    np.minimum, np.where, np.sign, np.exp, np.log, np.log1p, np.tanh,
+    np.sin, np.cos, np.hypot, np.power, np.dot, np.linalg.norm, np.pi,
+    np.float32, np.float64, np.negative, np.prod
+  plus the builtins abs, float, int, len, min, max, range, sum.
+- No imports, no exec/eval, no file I/O, no attribute access except on np,
+  no dunder names, no classes, no nested functions, no lambdas, no loops,
+  no comprehensions, no with/try/raise/assert, no yield/await, no delete.
+- Must contain an explicit ``return <float>``.
+- Keep the function short: usually 1--6 lines of body is enough.
+- The return value is clipped into [-10, 10] by the sandbox, so lam is
+  the only knob that controls the shaping magnitude.
+
+FEW-SHOT LIBRARY (diverse BONUS-form patterns; prefer this shape)
+Example A (right-vs-left leg symmetry bonus; peaks when leg angles mirror):
+    def aux_reward(obs, action, info):
+        asym = float(np.sum(np.abs(obs[2:5] - obs[5:8])))
+        return float(np.exp(-asym))
+
+Example B (pitch-stability bonus; peaks when body is level and still):
+    def aux_reward(obs, action, info):
+        return float(np.exp(-np.square(obs[10])))
+
+Example C (energetic efficiency bonus; rewards forward velocity per unit torque):
+    def aux_reward(obs, action, info):
+        effort = float(np.sum(np.square(action))) + 1e-3
+        return float(max(0.0, obs[8])) / effort
+
+Example D (stride-rhythm bonus; peaks when right and left legs alternate):
+    def aux_reward(obs, action, info):
+        right_rhy = float(np.sum(obs[11:14]))
+        left_rhy = float(np.sum(obs[14:17]))
+        return float(np.exp(-np.square(right_rhy + left_rhy)))
+
+Example E (joint-velocity smoothness bonus; peaks when all joint velocities small):
+    def aux_reward(obs, action, info):
+        jv = float(np.sum(np.square(obs[11:17])))
+        return float(np.exp(-0.1 * jv))
+
+All five examples are BONUSES in [0, 1]. Note the pattern: identify the
+quantity you want shaped, write it so zero deviation gives the maximum
+value, and use ``np.exp(-...)`` or ``max(0, 1-...)`` to make it a
+non-negative shaping term with the same local gradient as the equivalent
+penalty but without the stand-still trap. Pick a signal the parent
+contrast says the bottom parents are failing on.
+
+OUTPUT FORMAT (strict JSON, no prose outside the JSON object)
+{
+  "aux_reward_code": "def aux_reward(obs, action, info):\n    ...\n    return <float>\n",
+  "lam": <float in [0.01, 1.0]>,
+  "anneal_steps": <int, 0 for no anneal, else fraction of training to decay over>,
+  "rationale": "<2-3 sentences: what failure mode in the bottom parents your snippet targets, why your bonus-form avoids the stand-still trap, and why it is orthogonal to the base reward>"
+}
+
+Return nothing else.

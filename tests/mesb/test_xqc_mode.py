@@ -107,7 +107,9 @@ def test_adapter_command_matches_shazebs_trainer():
     assert cmd[2:] == ["env=HalfCheetah-v4", "seed=0", "num_seeds=3", "max_steps=100000",
                        "eval_interval=25000", "eval_episodes=10", "start_training=5000",
                        "run_dir=/r", "checkpoint_interval=0", "save_replay_buffer=false",
-                       "final_descriptors=true", "resume=never", "agent.tau=0.005"]
+                       "final_descriptors=true", "resume=never",
+                       "save_actor=true",  # actor.pkl for the VLM option, as train_xqc_gene.py
+                       "agent.tau=0.005"]
 
 
 def _descriptors(num_seeds=3, episodes=10):
@@ -116,7 +118,8 @@ def _descriptors(num_seeds=3, episodes=10):
             "distances": [[50.0 + s for _ in range(episodes)] for s in range(num_seeds)],
             "control_costs": [[0.3 for _ in range(episodes)] for _ in range(num_seeds)],
             "mean_return_per_seed": [sum(r) / len(r) for r in returns],
-            "mean_distance": 51.0, "mean_control_cost": 0.3}
+            "mean_distance": 51.0, "mean_control_cost": 0.3,
+            "foot_contact_0": 0.45, "foot_contact_1": 0.55}
 
 
 def test_payload_from_descriptors():
@@ -129,6 +132,7 @@ def test_payload_from_descriptors():
     assert p["std_reward"] == pytest.approx((2 / 3 * 100 ** 2) ** 0.5)
     assert p["behavior"]["mean_control_cost"] == pytest.approx(300.0)
     assert p["behavior"]["mean_control_cost_per_step"] == pytest.approx(0.3)
+    assert (p["behavior"]["foot_contact_0"], p["behavior"]["foot_contact_1"]) == (0.45, 0.55)
     assert len(p["rewards"]) == 30 and p["param_count"] == 12345
 
 

@@ -17,14 +17,12 @@ from xqc.envs.wrapper import RepeatAction, SinglePrecision
 
 #: Env var controlling optional VLM-authored auxiliary reward shaping. When
 #: set to a readable JSON cache path (produced by src/vlm_aux_reward.py),
-#: each env built by :func:`make_env` is wrapped with
-#: :class:`AuxRewardWrapper` so that TD3 / XQC training sees the shaped
-#: reward. Evaluation envs built with the paired seed+42 convention also
-#: pick up the wrapper, which is fine because the eval reward reported by
-#: the XQC trainer is still the sum of per-step rewards -- any shaping
-#: term adds to it. If you need an unshaped eval the convention is to
-#: unset the env var on the eval worker; XQC's final evaluation is a
-#: separate rollout path and is unaffected here.
+#: each training env built by :func:`make_env` is wrapped with
+#: :class:`AuxRewardWrapper` so that XQC training sees the shaped reward.
+#: Evaluation envs are built with ``aux_reward=False`` and always return the
+#: plain environment reward: the archive ranks genes by that evaluation, and
+#: a bonus there would count toward fitness (up to lam per step, as much as
+#: the task's own return at lam=10). Same rule as sota/MujocoRL/train_rl_vlm.py.
 AUX_REWARD_CACHE_ENV = "LLMGE_AUX_REWARD_CACHE"
 AUX_REWARD_LAM_ENV = "LLMGE_AUX_REWARD_LAM"
 AUX_REWARD_ANNEAL_ENV = "LLMGE_AUX_REWARD_ANNEAL"
@@ -110,7 +108,8 @@ def resolve_env_benchmark(env_name: str) -> str:
         raise ValueError(f"Unknown env: {env_name}")
 
 
-def make_env(env_name: str, seed: int = 0, action_repeat=1) -> gym.Env:
+def make_env(env_name: str, seed: int = 0, action_repeat=1, aux_reward: bool = True) -> gym.Env:
+    """Build one env. ``aux_reward=False`` for evaluation: never VLM-shaped."""
     benchmark = resolve_env_benchmark(env_name)
 
     if benchmark == "mujoco":
@@ -136,7 +135,8 @@ def make_env(env_name: str, seed: int = 0, action_repeat=1) -> gym.Env:
     if action_repeat > 1:
         env = RepeatAction(env, action_repeat)
 
-    env = _maybe_wrap_aux_reward(env)
+    if aux_reward:
+        env = _maybe_wrap_aux_reward(env)
     return env
 
 
@@ -145,7 +145,7 @@ class ParallelEnv:
     Parallel env adapted from https://github.com/naumix/BiggerRegularizedCategorical/blob/main/jaxrl/envs.py
     """
 
-    def __init__(self, env_names: list, seed: int = 0, action_repeat=1):
+    def __init__(self, env_names: list, seed: int = 0, action_repeat=1, aux_reward: bool = True):
         np.random.seed(seed)
         random.seed(seed)
 
@@ -153,7 +153,8 @@ class ParallelEnv:
         obs_dims = np.zeros(len(env_names), dtype=np.int32)
         act_dims = np.zeros(len(env_names), dtype=np.int32)
         for i, env_name in enumerate(env_names):
-            envs.append(make_env(env_name, seed=seed, action_repeat=action_repeat))
+            envs.append(make_env(env_name, seed=seed, action_repeat=action_repeat,
+                                 aux_reward=aux_reward))
             obs_dims[i] = envs[-1].observation_space.shape[0]
             act_dims[i] = envs[-1].action_space.shape[0]
 

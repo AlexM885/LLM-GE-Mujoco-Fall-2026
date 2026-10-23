@@ -22,8 +22,11 @@ from sota.MujocoRL.mesb_archive import ArchiveRecord
 
 SCHEMA_VERSION = 1
 
-#: Names of the two MESB behaviour descriptors, in archive-axis order.
-DESCRIPTOR_KEYS: tuple[str, str] = ("mean_distance", "mean_control_cost")
+#: Names of the two MESB behaviour descriptors, in archive-axis order: the
+#: proportion of evaluation steps each foot touches the ground, in MuJoCo
+#: geom-id order (Walker2d: right, left; HalfCheetah: back, front). The same
+#: descriptors as run_improved.py's archive (MAP_ELITES_DESCRIPTORS).
+DESCRIPTOR_KEYS: tuple[str, str] = ("foot_contact_0", "foot_contact_1")
 #: Name of the quality measure that decides cell elites.
 OBJECTIVE_KEY = "mean_reward"
 

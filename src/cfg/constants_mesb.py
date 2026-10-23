@@ -46,7 +46,8 @@ ALGO_PROFILES = {
         "constant_rules": CONSTANT_RULES_PATH,
         "required_functions": ("get_policy_kwargs", "get_td3_kwargs"),
         "train_script": TRAIN_SCRIPT,
-        "eval_timesteps": 500_000,
+        # Same per-gene training as run_improved.py (run_options.GENE_TIMESTEPS).
+        "eval_timesteps": run_options.GENE_TIMESTEPS["td3"],
         "eval_num_seeds": 1,
         "slurm_script": ROOT_DIR / "scripts" / "mesb" / "td3_gene.sbatch",
     },
@@ -67,9 +68,10 @@ ALGO_PROFILES = {
         "constant_rules": "templates/Mujoco/XQC_ConstantRules.txt",
         "required_functions": ("get_architecture_kwargs", "get_xqc_kwargs"),
         "train_script": SOTA_ROOT / "train_gene_xqc.py",
-        #: Shazeb's island budget: 100k env steps x 3 seeds trained together.
-        "eval_timesteps": 100_000,
-        "eval_num_seeds": 3,
+        #: Shazeb's island budget: 100k env steps x 3 seeds trained together
+        #: (run_options.GENE_TIMESTEPS / GENE_TRAIN_SEEDS, as run_improved.py).
+        "eval_timesteps": run_options.GENE_TIMESTEPS["xqc"],
+        "eval_num_seeds": run_options.GENE_TRAIN_SEEDS["xqc"],
         #: One GPU job per gene (sbatch --wait); see scripts/mesb/xqc_gene.sbatch.
         "slurm_script": ROOT_DIR / "scripts" / "mesb" / "xqc_gene.sbatch",
     },
@@ -89,8 +91,18 @@ EVAL_DEVICE = "cpu"
 #: Wall-clock limit per gene (train + eval); exceeded -> status "failed".
 EVAL_TIMEOUT_SEC = 6 * 60 * 60
 
+# --- Budget (shared with run_improved.py through run_options.py) --------------
+#: Environment steps of the whole run, charged per successfully trained gene
+#: (eval_timesteps x eval_num_seeds). The run ends when it is spent.
+TOTAL_TIMESTEPS = run_options.TOTAL_TIMESTEPS
+#: A row in milestones.csv (and the archive snapshot of that generation) at
+#: every multiple of this many steps.
+MILESTONE_TIMESTEPS = run_options.MILESTONE_TIMESTEPS
+
 # --- Evolution (mirrors constants_Mujoco.py) -----------------------------------
 SEED = 0
+#: Only used when TOTAL_TIMESTEPS is 0; with a budget, --num-generations is an
+#: optional extra cap.
 NUM_GENERATIONS = 30
 START_POPULATION_SIZE = 32
 POPULATION_SIZE = 32
@@ -120,9 +132,9 @@ LLM_MODEL = "llama3"
 NSGA2_OBJECTIVES = (("mean_reward", 1.0), ("param_count", -1.0))
 
 # --- MESB archive ------------------------------------------------------------------
-#: Cells per descriptor (mean_distance, mean_control_cost). 20 matches the
-#: legacy fixed-grid MAP_BINS so the two approaches can be compared directly.
-MESB_DIMS = (20, 20)
+#: Cells per descriptor (foot_contact_0, foot_contact_1). 32 x 32 matches
+#: run_improved.py's foot-contact grid (MAP_BINS) so the two can be compared.
+MESB_DIMS = (32, 32)
 #: Paper default: recompute boundaries every 100 successful evaluations.
 MESB_REMAP_FREQUENCY = 100
 #: Paper default xi = infinity (keep every successful evaluation).
@@ -135,4 +147,5 @@ MESB_QD_SCORE_OFFSET = None
 #: with --archive-boundaries fixed. NOTE: that commit's control cost was a
 #: per-step mean; ours is a per-episode total (see docs/MESB.md), so choose
 #: ranges for the fixed baseline explicitly.
-LEGACY_FIXED_RANGES = ((-500.0, 2000.0), (0.0, 10.0))
+#: Foot contact is a proportion, so the fixed grid spans [0, 1] on both axes.
+LEGACY_FIXED_RANGES = ((0.0, 1.0), (0.0, 1.0))

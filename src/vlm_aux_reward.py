@@ -97,7 +97,13 @@ ZERO_AUX_CODE = (
 # Prompt building
 # --------------------------------------------------------------------------- #
 def load_prompt_template(name: str = "emit") -> str:
-    path = os.path.join(TEMPLATE_ROOT, f"{name}.txt")
+    # The prompts describe the robot's observation indices, so each robot has
+    # its own: <name>_walker2d.txt for Walker2d, <name>.txt (HalfCheetah) else.
+    env_id = (os.environ.get("VLM_ENV_ID") or os.environ.get("MUJOCO_ENV_ID") or "").lower()
+    robot = env_id.split("-")[0]
+    path = os.path.join(TEMPLATE_ROOT, f"{name}_{robot}.txt")
+    if not robot or not os.path.isfile(path):
+        path = os.path.join(TEMPLATE_ROOT, f"{name}.txt")
     with open(path, "r", encoding="utf-8") as handle:
         return handle.read()
 

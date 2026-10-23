@@ -60,7 +60,9 @@ def _forward_reward(info):
 
 
 def rollout_descriptors(agent, env_name, num_seeds, num_episodes=10, seed=0, action_repeat=1):
-    envs = [make_env(env_name, seed=seed, action_repeat=action_repeat) for _ in range(num_seeds)]
+    # Plain reward, never the VLM aux bonus: this rollout is the gene's fitness.
+    envs = [make_env(env_name, seed=seed, action_repeat=action_repeat, aux_reward=False)
+            for _ in range(num_seeds)]
     returns = np.zeros((num_seeds, num_episodes))
     distances = np.zeros((num_seeds, num_episodes))
     ctrl_costs = np.zeros((num_seeds, num_episodes))
@@ -128,7 +130,9 @@ def record_videos(agent, env_name, num_seeds, out_dir, steps=300, seed=0, action
     import imageio
 
     os.makedirs(out_dir, exist_ok=True)
-    envs = [make_env(env_name, seed=seed, action_repeat=action_repeat) for _ in range(num_seeds)]
+    # Plain reward, never the VLM aux bonus: this rollout is the gene's fitness.
+    envs = [make_env(env_name, seed=seed, action_repeat=action_repeat, aux_reward=False)
+            for _ in range(num_seeds)]
     obs = np.stack([env.reset(seed=seed + 1000 * s)[0] for s, env in enumerate(envs)]).astype(np.float32)
     frames = [[] for _ in range(num_seeds)]
     returns = np.zeros(num_seeds)

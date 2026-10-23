@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=mesb
-#SBATCH -t 16:00:00
+#SBATCH -t 8:00:00
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH --cpus-per-task=16
@@ -21,8 +21,10 @@
 # LLMGE_SEED), and the robot is the ROBOT run option (LLMGE_ROBOT).
 # ALGO=ppo trains PPO genes on this job's CPUs (needs a PPO --seed-network).
 #
-# For runs longer than 16 h: CHAIN=N scripts/mesb/submit_mesb.sh ... queues N
-# jobs back to back, each resuming from the last checkpoint.
+# The run ends when the step budget (MUJOCO_TOTAL_TIMESTEPS, src/cfg/run_options.py)
+# is spent, which takes far longer than one 8 h job: resubmit with the same
+# RUN_NAME (it resumes from the last checkpoint), or CHAIN=N
+# scripts/mesb/submit_mesb.sh ... queues N jobs back to back.
 #
 # Submit with scripts/mesb/submit_mesb.sh (creates the log dir first), or:
 #   mkdir -p mujoco_rl_output/slurm_logs
@@ -42,8 +44,8 @@ if [[ -z "$ALGO" ]]; then
 fi
 SEED="${SEED:-0}"
 SELECTION_MODE="${SELECTION_MODE:-mesb}"          # nsga2 | mesb-shadow | mesb
-DIMS_X="${DIMS_X:-20}"
-DIMS_Y="${DIMS_Y:-20}"
+DIMS_X="${DIMS_X:-32}"                             # foot_contact_0 cells
+DIMS_Y="${DIMS_Y:-32}"                             # foot_contact_1 cells
 REMAP_FREQUENCY="${REMAP_FREQUENCY:-100}"
 BUFFER_CAPACITY="${BUFFER_CAPACITY:-none}"
 # Training steps per gene; empty = the learner's default (ppo 500000, xqc 100000).
@@ -51,14 +53,11 @@ TIMESTEPS="${TIMESTEPS:-${PPO_TIMESTEPS:-}}"
 NUM_SEEDS="${NUM_SEEDS:-}"                         # xqc: seeds per gene (default 3)
 EVAL_EPISODES="${EVAL_EPISODES:-10}"
 EVAL_MAX_STEPS="${EVAL_MAX_STEPS:-1000}"
-if [[ "$ALGO" == xqc ]]; then
-    NUM_GENERATIONS="${NUM_GENERATIONS:-15}"
-    WORKERS="${WORKERS:-${GPU_JOBS:-16}}"         # concurrent per-gene GPU jobs
-elif [[ "$ALGO" == td3 ]]; then
-    NUM_GENERATIONS="${NUM_GENERATIONS:-30}"
+# Generations: empty = until the step budget is spent; a number caps them.
+NUM_GENERATIONS="${NUM_GENERATIONS:-}"
+if [[ "$ALGO" == xqc || "$ALGO" == td3 ]]; then
     WORKERS="${WORKERS:-${GPU_JOBS:-16}}"         # concurrent per-gene GPU jobs
 else
-    NUM_GENERATIONS="${NUM_GENERATIONS:-30}"
     WORKERS="${WORKERS:-${SLURM_CPUS_PER_TASK:-1}}"
 fi
 LLM_WORKERS="${LLM_WORKERS:-8}"                  # concurrent LLM calls (server batches them)
@@ -91,6 +90,7 @@ fi
 ALGO_ARGS=(--algo "$ALGO")
 [[ -n "$TIMESTEPS" ]] && ALGO_ARGS+=(--eval-timesteps "$TIMESTEPS")
 [[ -n "$NUM_SEEDS" ]] && ALGO_ARGS+=(--eval-num-seeds "$NUM_SEEDS")
+[[ -n "$NUM_GENERATIONS" ]] && ALGO_ARGS+=(--num-generations "$NUM_GENERATIONS")
 if [[ "$ALGO" == xqc || "$ALGO" == td3 ]]; then
     ALGO_ARGS+=(--evaluator slurm)
     export MESB_GENE_SBATCH_FLAGS="${GENE_SBATCH_FLAGS:-}"
@@ -108,7 +108,6 @@ $DRIVER_PYTHON run_mesb.py \
     "${ALGO_ARGS[@]}" \
     --eval-episodes "$EVAL_EPISODES" \
     --eval-max-steps "$EVAL_MAX_STEPS" \
-    --num-generations "$NUM_GENERATIONS" \
     --workers "$WORKERS" \
     --llm-workers "$LLM_WORKERS" \
     --llm-python "$LLM_PYTHON" \

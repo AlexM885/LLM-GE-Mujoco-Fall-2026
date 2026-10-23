@@ -136,7 +136,8 @@ def main(cfg: DictConfig):
             action_repeat=cfg.env.action_repeat,
         )
         env = make_envs(seed=cfg.seed)
-        eval_env = make_envs(seed=cfg.seed + 42)
+        # Evaluation sees the plain reward, never the VLM aux bonus.
+        eval_env = make_envs(seed=cfg.seed + 42, aux_reward=False)
         # Upstream leaves the action space unseeded, so warm-up actions come from
         # OS entropy and fixed-seed runs are not reproducible. Seed it here.
         env.action_space.seed(cfg.seed)
