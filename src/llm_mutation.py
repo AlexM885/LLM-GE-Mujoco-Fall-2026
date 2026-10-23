@@ -48,6 +48,11 @@ def augment_network(input_filename='network.py', output_filename='network_x.py',
     with open(fname, 'r') as file:
         template_txt = file.read()
     
+    # The robot of this run (ROBOT in src/cfg/run_options.py) is named in the
+    # prompts by placeholder, so one set of templates serves every robot.
+    # Other domains' constants define neither name and have no placeholders.
+    template_txt = (template_txt.replace("<ENV_ID>", globals().get("MUJOCO_ENV_ID", "<ENV_ID>"))
+                    .replace("<ROBOT_TASK_NOTE>", globals().get("ROBOT_TASK_NOTE", "")))
     # Prompt templates use a single literal "{}" marker for the code chunk.
     # Using str.format would treat JSON/dict examples in the prompt as fields.
     if "{}" not in template_txt:

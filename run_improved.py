@@ -55,6 +55,10 @@ DIRECTIONAL_PROMPT_TEMPLATE = globals().get("DIRECTIONAL_PROMPT_TEMPLATE", "temp
 EMITTER_ALLOCATOR_WINDOW = globals().get("EMITTER_ALLOCATOR_WINDOW", 10)
 EMITTER_ALLOCATOR_TEMPERATURE = globals().get("EMITTER_ALLOCATOR_TEMPERATURE", 0.5)
 EMITTER_ALLOCATOR_TIMEOUT = globals().get("EMITTER_ALLOCATOR_TIMEOUT", 900)
+# Named in the emitter prompts: the learner the genes configure and the robot's task.
+LEARNER_NAME = {"td3": "Stable-Baselines3 TD3", "xqc": "XQC (JAX)"}.get(globals().get("SEED", "td3"), "TD3")
+MUJOCO_ENV_ID = globals().get("MUJOCO_ENV_ID", "Walker2d-v5")
+ROBOT_TASK_NOTE = globals().get("ROBOT_TASK_NOTE", "")
 # Budget of successfully trained genes for the whole run; 0 disables it.
 MAX_SUCCESSFUL_EVALS = globals().get("MAX_SUCCESSFUL_EVALS", 0)
 
@@ -71,6 +75,18 @@ def count_successful_evals(*stores):
             if metrics and metrics.get(MAP_ELITES_OBJECTIVE, FAILED_EVAL_SENTINEL) > FAILED_EVAL_SENTINEL:
                 successful.add(gene_id)
     return len(successful)
+# Pareto-front-per-cell mode (Multi-Objective MAP-Elites): each cell keeps a
+# Pareto front instead of one elite (see constants_Mujoco.py).
+MOME = globals().get("PARETO_FRONT_PER_CELL_MODE", False)
+MOME_OBJECTIVES = globals().get("MOME_OBJECTIVES", [])
+MOME_FRONT_SIZE = globals().get("MOME_FRONT_SIZE", 4)
+MOME_REFERENCE_POINT = globals().get("MOME_REFERENCE_POINT", None)
+GENE_JOB_TIME = globals().get("GENE_JOB_TIME", "")
+# Crossover jobs run src/llm_crossover_fixed.py (Aayush's chunk-index fix: the original
+# writes the LLM's answer one chunk early, over the ALGO header of XQC genes, so 31 of 33
+# crossover children of xqc_island_run2 were invalid). LLMGE_FIX_CROSSOVER=0 restores it.
+CROSSOVER_SCRIPT = ('src/llm_crossover_fixed.py' if os.getenv("LLMGE_FIX_CROSSOVER", "1") == "1"
+                    else 'src/llm_crossover.py')
 
 def print_ancestry(data):
     for gene in data.keys():
@@ -238,7 +254,7 @@ def write_bash_script(llm_model,
             file.write(template_txt)
         temp_text = f'{python_file} {input_filename_x} {output_filename} {file_path} --top_p {top_p} --temperature {temperature}'
         python_runline = f"uv run python {temp_text} --apply_quality_control '{QC_CHECK_BOOL}' --llm_model {llm_model}"
-    elif python_file=='src/llm_crossover.py':
+    elif python_file in ('src/llm_crossover.py', 'src/llm_crossover_fixed.py'):
         gene_id_parent2 = fetch_gene(input_filename_y)
         GLOBAL_DATA_ANCESTRY = update_ancestry(gene_id_child, gene_id_parent, GLOBAL_DATA_ANCESTRY, 
                                                 mutation_type=None, gene_id_parent2=gene_id_parent2)
@@ -280,8 +296,8 @@ def wait_for_llm_server(timeout=3600, check_interval=10):
 
     if not LOCAL_LLM:
         return True
-    if LLM_SERVER_READY:
-        return True
+    # Checked before every LLM job, not just once: a server job can end or crash
+    # (e.g. a bad GPU node) mid-run, and LLM jobs sent with no server all fail.
 
     env_timeout = os.getenv("LLM_SERVER_READY_TIMEOUT")
     env_interval = os.getenv("LLM_SERVER_READY_CHECK_INTERVAL")
@@ -307,14 +323,16 @@ def wait_for_llm_server(timeout=3600, check_interval=10):
             try:
                 with urllib.request.urlopen(server_url, timeout=5) as response:
                     if 200 <= response.status < 300:
+                        if not LLM_SERVER_READY:
+                            print(f"\t☑ LLM server is ready at {server_url}", flush=True)
                         LLM_SERVER_READY = True
-                        print(f"\t☑ LLM server is ready at {server_url}", flush=True)
                         return True
             except urllib.error.URLError as err:
                 last_error = err
             except TimeoutError as err:
                 last_error = err
 
+        LLM_SERVER_READY = False
         elapsed = round(time.time() - start_time)
         print(
             f"\t‣ Waiting for LLM server readiness ({elapsed}s/{timeout}s). "
@@ -496,7 +514,9 @@ def submit_run(gene_id):
         job_id = None
         successful_sub_flag = False
         local_output = None
-        result = subprocess.run([RUN_COMMAND, file_path], capture_output=True, text=True)
+        # Command-line options override the script's #SBATCH lines.
+        time_opt = ['-t', GENE_JOB_TIME] if GENE_JOB_TIME and not LOCAL else []
+        result = subprocess.run([RUN_COMMAND, *time_opt, file_path], capture_output=True, text=True)
         if LOCAL:
             local_output = result.stdout.strip() + '\n' + result.stderr.strip()
             print("\t‣ Output:", local_output, flush=True)
@@ -850,7 +870,7 @@ def combine_elements(ind1, ind2, llm_model, temp_min=0.05, temp_max=0.1, prompt_
                                       input_filename_y=f'{VARIANT_DIR}/{MODEL}_{gene_id_2}.py',
                                       output_filename=f'{VARIANT_DIR}/{MODEL}_{new_gene_id}.py',
                                       gpu=config.get("LLM_GPU"),
-                                      python_file='src/llm_crossover.py',
+                                      python_file=CROSSOVER_SCRIPT,
                                       job_name="crossover_operation",
                                       top_p=0.1, llm_model=llm_model, temperature=temperature,
                                       template_file=template_file)
@@ -1091,11 +1111,26 @@ def true_nsga2(pop, k):
     return new_pop
 
 def get_metrics(gene_id):
-    """Named evaluation metrics for a gene, or None if it never completed."""
+    """Named evaluation metrics for a gene, or None if it never completed.
+
+    Falls back to the gene's results CSV: after a resume GLOBAL_DATA only holds the
+    last generation, and older archive members may have no metrics in memory."""
     for store in (GLOBAL_DATA, GLOBAL_DATA_HIST):
         entry = store.get(gene_id)
         if entry and entry.get('metrics'):
             return entry['metrics']
+    path = f'{SOTA_ROOT}/results/{gene_id}_results.csv'
+    if os.path.exists(path):
+        with open(path) as f:
+            lines = [line.strip() for line in f if line.strip()]
+        if len(lines) > 1:
+            metrics = {}
+            for name, value in zip(lines[0].split(','), lines[-1].split(',')):
+                try:
+                    metrics[name.strip()] = float(value)
+                except ValueError:
+                    continue
+            return metrics
     return None
 
 def get_bin(individual):
@@ -1237,6 +1272,8 @@ def directional_prompt(source_bin, guide_bin, target_bin):
         "<GUIDE_RETURN>": f"{get_quality(MAP_ELITES_ARCHIVE[guide_bin]):.1f}",
         "<DELTA>": format_behaviour(guide - source),
         "<TARGET>": format_behaviour(bin_centroid(target_bin)),
+        "<LEARNER>": LEARNER_NAME,
+        "<ENV_ID>": MUJOCO_ENV_ID,
     }
     for token, value in fields.items():
         template_txt = template_txt.replace(token, value)
@@ -1344,7 +1381,7 @@ def allocator_prompt(n, gen):
     emitter_lines = "\n".join(f"  {emitter}: {rates(emitter)}" for emitter in EMITTERS)
     return f"""You are an expert in Quality-Diversity optimization. You have access to an emitter set E = {{{", ".join(EMITTERS)}}}. Your task is to allocate N = {n} offspring among these emitters to maximize archive coverage and fitness. Analyze the search phase from t, evaluate the archive history and the emitter performance histories over a sliding window W = {EMITTER_ALLOCATOR_WINDOW}, where each r in [0, 1] is a success rate, then balance exploration against exploitation.
 
-Each offspring is an LLM edit of a TD3 learner for Gymnasium Walker2d-v5. It is trained, scored by mean return, and placed in a {MAP_BINS} x {MAP_BINS} MAP-Elites grid over the fraction of time each foot touches the ground, where it survives only if it fills an empty cell or beats that cell's elite.
+Each offspring is an LLM edit of a {LEARNER_NAME} learner for Gymnasium {MUJOCO_ENV_ID}. It is trained, scored by mean return, and placed in a {MAP_BINS} x {MAP_BINS} MAP-Elites grid over the fraction of time each foot touches the ground, where it survives only if it fills an empty cell or beats that cell's elite.
 - uniform: varies an elite drawn uniformly from the archive (broad exploration).
 - sparse: varies an elite drawn from cells with few occupied neighbours or recent success (expands the archive's frontier).
 - directional: crosses an elite with a guide elite to push toward the empty cell furthest from the archive (fills gaps).
@@ -1424,11 +1461,143 @@ def decay_curiosity():
     for bin_idx in MAP_ELITES_CURIOSITY:
         MAP_ELITES_CURIOSITY[bin_idx] *= CURIOSITY_DECAY
 
+def archive_members():
+    """Every individual in the archive (MOME: all genes of all cell fronts)."""
+    if MOME:
+        return [ind for front in MAP_ELITES_ARCHIVE.values() for ind in front]
+    return list(MAP_ELITES_ARCHIVE.values())
+
+def get_objectives(individual):
+    """MOME objective vector (every entry maximised), or None if not available."""
+    metrics = get_metrics(individual[0])
+    if not metrics or any(name not in metrics for name in MOME_OBJECTIVES):
+        return None
+    objs = tuple(float(metrics[name]) for name in MOME_OBJECTIVES)
+    return objs if all(np.isfinite(objs)) else None
+
+def dominates(a, b):
+    return all(x >= y for x, y in zip(a, b)) and any(x > y for x, y in zip(a, b))
+
+def pareto_indices(points):
+    """Indices of the non-dominated points; of identical points only the first."""
+    keep = []
+    for i, p in enumerate(points):
+        if any(dominates(q, p) for q in points):
+            continue
+        if any(points[j] == p for j in keep):
+            continue
+        keep.append(i)
+    return keep
+
+def crowding_distances(points):
+    """NSGA-II crowding distance; the extremes of each objective get infinity."""
+    n = len(points)
+    dist = [0.0] * n
+    for m in range(len(points[0])):
+        order = sorted(range(n), key=lambda i: points[i][m])
+        lo, hi = points[order[0]][m], points[order[-1]][m]
+        dist[order[0]] = dist[order[-1]] = float('inf')
+        if hi == lo:
+            continue
+        for k in range(1, n - 1):
+            dist[order[k]] += (points[order[k + 1]][m] - points[order[k - 1]][m]) / (hi - lo)
+    return dist
+
+def hypervolume_2d(points, ref):
+    """Area dominated by `points` (maximised) and bounded below by `ref`."""
+    pts = sorted({p for p in points if p[0] > ref[0] and p[1] > ref[1]}, key=lambda p: -p[0])
+    hv, top = 0.0, ref[1]
+    for x, y in pts:
+        if y > top:
+            hv += (x - ref[0]) * (y - top)
+            top = y
+    return hv
+
+def mome_insert(front, ind):
+    """New front of a cell after offering `ind`. A front over its size limit drops
+    the gene with the smallest crowding distance (the newest one on ties)."""
+    candidates = front + [ind]
+    points = [get_objectives(m) for m in candidates]
+    keep = pareto_indices(points)
+    while len(keep) > MOME_FRONT_SIZE:
+        dist = crowding_distances([points[i] for i in keep])
+        keep.pop(min(range(len(keep)), key=lambda k: (dist[k], -keep[k])))
+    return [candidates[i] for i in keep]
+
+def mome_summary():
+    """Archive metrics with the fixed reference point (comparable across runs)."""
+    members = archive_members()
+    points = [get_objectives(m) for m in members]
+    total_cells = MAP_BINS ** len(MAP_ELITES_DESCRIPTORS)
+    return {
+        "cells": len(MAP_ELITES_ARCHIVE),
+        "coverage_pct": 100.0 * len(MAP_ELITES_ARCHIVE) / total_cells,
+        "genes": len(members),
+        "moqd_score": sum(hypervolume_2d([get_objectives(m) for m in f], MOME_REFERENCE_POINT)
+                          for f in MAP_ELITES_ARCHIVE.values()),
+        "global_hypervolume": hypervolume_2d(points, MOME_REFERENCE_POINT) if points else 0.0,
+        "max_speed": max((p[0] for p in points), default=float('nan')),
+        "max_reward": max((get_quality(m) for m in members), default=float('nan')),
+    }
+
+def write_archive_csv(gen, folder_name):
+    """One row per archive gene: cell, objectives, descriptors, score."""
+    import csv as _csv
+    path = os.path.join(folder_name, f'archive_gen_{gen}.csv')
+    names = [d[0] for d in MAP_ELITES_DESCRIPTORS]
+    with open(path, 'w', newline='') as f:
+        w = _csv.writer(f)
+        w.writerow(['cell', 'gene_id', *MOME_OBJECTIVES, *names, MAP_ELITES_OBJECTIVE])
+        for cell in sorted(MAP_ELITES_ARCHIVE):
+            for ind in MAP_ELITES_ARCHIVE[cell]:
+                m = get_metrics(ind[0])
+                w.writerow([' '.join(map(str, cell)), ind[0], *get_objectives(ind),
+                            *[m.get(n) for n in names], get_quality(ind)])
+    print(f"\t‣ MOME archive written to {path}")
+
+def update_mome_archive(population):
+    """Offer each individual to its cell's Pareto front (Multi-Objective MAP-Elites)."""
+    global MAP_ELITES_ARCHIVE
+    entered = rejected = 0
+    for ind in population:
+        if not ind.fitness.valid or tuple(ind.fitness.values) == tuple(INVALID_FITNESS_MAX):
+            continue
+        if ind.fitness.values == PLACEHOLDER_FITNESS:
+            continue
+        bin_idx = get_bin(ind)
+        objs = get_objectives(ind)
+        if bin_idx is None or objs is None:
+            continue
+        if get_quality(ind) <= FAILED_EVAL_SENTINEL:
+            print(f"\t‣ MOME: Skipped failed gene {ind[0]}")
+            continue
+        front = MAP_ELITES_ARCHIVE.get(bin_idx, [])
+        if any(m[0] == ind[0] for m in front):
+            continue
+        new_front = mome_insert(front, ind)
+        if any(m is ind for m in new_front):
+            entered += 1
+            dropped = [m[0] for m in front if not any(m is n for n in new_front)]
+            print(f"\t‣ MOME: {ind[0]} entered cell {bin_idx} (speed {objs[0]:.1f}, effort {-objs[1]:.1f})"
+                  + (f", replacing {dropped}" if dropped else ""))
+        else:
+            rejected += 1
+        MAP_ELITES_ARCHIVE[bin_idx] = new_front
+    summary = mome_summary()
+    print(f"\t‣ MOME: {entered} entered, {rejected} not kept; {summary['cells']} cells "
+          f"({summary['coverage_pct']:.1f}% coverage), {summary['genes']} genes, "
+          f"MOQD score {summary['moqd_score']:.1f}, global hypervolume {summary['global_hypervolume']:.1f}, "
+          f"max speed {summary['max_speed']:.1f}, max reward {summary['max_reward']:.1f}")
+    return entered, rejected
+
 def update_archive(population):
     """Insert individuals into the MAP-Elites archive, one elite per cell.
 
-    Returns the gene ids that filled or took over a cell.
+    Returns the gene ids that filled or took over a cell. In
+    pareto-front-per-cell mode each cell keeps a Pareto front instead.
     """
+    if MOME:
+        return update_mome_archive(population)
     global MAP_ELITES_ARCHIVE
     added = replaced = 0
     updated_genes = set()
@@ -1533,6 +1702,11 @@ if __name__ == "__main__":
     print("ISLAND llm_model: ", llm_model)
     print(f"Prompt glob: {PROMPT_GLOB}")
 
+    if "describe_run_options" in globals():
+        print(f"Run options: {describe_run_options()}")
+    if globals().get("SLIDING_BOUNDARIES", False):
+        print("Sliding boundaries run their own driver: start run_mesb.py (run.sh does this). Exiting script")
+        exit(1)
     if USE_MAP_ELITES:
         print(f"LLM emitters + allocator: {'on' if USE_LLM_EMITTERS else 'off (uniform parent selection)'}")
 
@@ -1551,6 +1725,16 @@ if __name__ == "__main__":
         MAP_ELITES_ARCHIVE = population_data.get("MAP_ELITES_ARCHIVE", {})
         MAP_ELITES_CURIOSITY = population_data.get("MAP_ELITES_CURIOSITY", {})
         MAP_ELITES_EMITTER_HISTORY = population_data.get("MAP_ELITES_EMITTER_HISTORY", [])
+        # GLOBAL_DATA only holds the last generation's genes, and the history can
+        # hold stale invalid entries for older elites. The checkpointed fitness is
+        # authoritative: record it so the fitness reset below restores it instead
+        # of marking those elites invalid (-inf) and dropping them.
+        for ind in list(population) + archive_members():
+            fit = tuple(ind.fitness.values) if ind.fitness.valid else None
+            if fit and fit not in (tuple(INVALID_FITNESS_MAX), tuple(PLACEHOLDER_FITNESS)):
+                entry = dict(GLOBAL_DATA.get(ind[0]) or GLOBAL_DATA_HIST.get(ind[0]) or {'start_time': time.time()})
+                entry.update(sub_flag=True, status='completed', fitness=fit)
+                GLOBAL_DATA[ind[0]] = entry
     else:
         # Create an initial population
         start_gen = 1
@@ -1580,7 +1764,7 @@ if __name__ == "__main__":
                 break
         if USE_MAP_ELITES:
             # The archive, not the last batch of offspring, is the live population.
-            archived = list(MAP_ELITES_ARCHIVE.values())
+            archived = archive_members()
             if archived:
                 population = archived
         TOP_N_GENES = tools.selSPEA2(population, NUM_EOT_ELITES) if population else []
@@ -1616,7 +1800,7 @@ if __name__ == "__main__":
             population = [ind for ind in population if ind.fitness.values != INVALID_FITNESS_MAX]
             if USE_MAP_ELITES:
                 update_archive(population)
-                population = list(MAP_ELITES_ARCHIVE.values()) or population
+                population = archive_members() or population
             box_print("CURRENT POPULATION SIZE:", len(population))
 
         print_population(population, GLOBAL_DATA)
@@ -1633,7 +1817,12 @@ if __name__ == "__main__":
             # Size the batch to the budget before splitting it between
             # emitters, so the cut does not fall on one emitter only.
             n_offspring = min(population_size, remaining_evals) if MAX_SUCCESSFUL_EVALS else population_size
-            if MAP_ELITES_ARCHIVE:
+            if MOME and MAP_ELITES_ARCHIVE:
+                # Pareto front per cell: a filled cell uniformly, then a gene of its front uniformly.
+                print(f"Selecting {n_offspring} offspring: uniform cell, then uniform front member")
+                fronts = list(MAP_ELITES_ARCHIVE.values())
+                offspring = [random.choice(random.choice(fronts)) for _ in range(n_offspring)]
+            elif MAP_ELITES_ARCHIVE:
                 allocation = allocate_emitters(n_offspring, gen)
                 print(f"Selecting {n_offspring} offspring from the archive: "
                       + ", ".join(f"{emitter} {k}" for emitter, k in allocation.items()))
@@ -1730,7 +1919,7 @@ if __name__ == "__main__":
             if USE_LLM_EMITTERS:
                 record_emitter_history(gen, offspring, updated_genes)
                 decay_curiosity()
-            population[:] = list(MAP_ELITES_ARCHIVE.values()) or offspring
+            population[:] = archive_members() or offspring
         else:
             # Replace the old population with the offspring
             population[:] = offspring
@@ -1738,6 +1927,8 @@ if __name__ == "__main__":
         print_scores(population, FITNESS_WEIGHTS)
         hof.update(population)
         save_checkpoint(gen, folder_name=args.checkpoints, global_path=args.global_path)
+        if MOME:
+            write_archive_csv(gen, args.checkpoints)
         LINKED_GENES = {}
         # mutate x prompts
         # mutate_prompts()

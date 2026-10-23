@@ -1,0 +1,20 @@
+# @package _global_
+# Step-budget ranking test on Ant-v4: do config variants keep their order between
+# 250k and 1M steps? Each variant runs 3 seeds (0-2) to 1M with the paper's
+# settings; variants are single agent overrides standing in for LLM mutations.
+#   v0 baseline                     (no override)
+#   v1 smaller critic               agent.hidden_dims_critic=[512,512]
+#   v2 lower learning rates         agent.actor_lr=1e-4 agent.critic_lr=1e-4
+#   v3 higher learning rates        agent.actor_lr=1e-3 agent.critic_lr=1e-3
+#   v4 no policy delay              agent.policy_delay=1
+#   v5 no reward normalization      agent.reward_normalization=false
+# Launch: pace/launch_chain.sh ant_budget_v1 -- +experiment=ant_v4_budget_test <override>
+defaults:
+  - override /env: Ant-v4
+
+seed: 0
+num_seeds: 3
+max_steps: 1_000_000
+eval_interval: 25_000
+eval_episodes: 10
+checkpoint_interval: 50_000

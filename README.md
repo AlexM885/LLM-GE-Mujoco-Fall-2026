@@ -45,6 +45,14 @@ ______
 
 ______
 
+### XQC MuJoCo baseline (PACE-ICE)
+Resumable XQC (ICLR 2026) baseline in `sota/XQC`. Launch and resume on PACE-ICE with job chains of at most 8 h per job:
+```bash
+bash sota/XQC/pace/launch_chain.sh halfcheetah_v4_s0 -n 2 -p ice-gpu -- +experiment=halfcheetah_v4_baseline   # launch
+bash sota/XQC/pace/launch_chain.sh halfcheetah_v4_s0 -n 1 -p ice-gpu                                          # resume
+```
+Setup, config keys and output format: [sota/XQC/README.md](sota/XQC/README.md).
+
 ### Autonomous Model Evolution:
 
 #### ExqusiteNetV2

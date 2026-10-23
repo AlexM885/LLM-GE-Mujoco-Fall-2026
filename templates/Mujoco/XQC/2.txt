@@ -1,0 +1,8 @@
+Mutate this Mujoco RL gene chunk to improve reward while keeping the actor's parameter count reasonable.
+
+The returned settings configure an XQC agent (batch-normalized, weight-normalized MLP actor and categorical critic ensemble) trained on <ENV_ID>.
+
+The current code block:
+```python
+{}
+```

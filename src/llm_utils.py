@@ -530,29 +530,31 @@ def submit_mixtral_local(prompt, max_new_tokens=850, temperature=0.2, top_p=0.15
 
     headers = {"Content-Type": "application/json"}
 
-    llm_hostname = get_llm_server_hostname()
-    
-    print(llm_hostname)
-
-    server_url = f"http://{llm_hostname}:{PORT}/generate"
-    
-    try:
-        response = requests.post(server_url, headers=headers, json=payload)
-        
-        if response.status_code == 200:
-            output_txt = response.json().get("generated_text", "No output received.")
-            print(f'{response.json().get("response_time_sec", "-1")} sec')
-            if return_gen is False:
-                return output_txt
-            else:
-                return output_txt, generate_text
-        else:
+    # Retry while the server is down or still loading (e.g. a replacement server
+    # job took over hostname.log), re-reading the hostname on every attempt.
+    retry_seconds = int(os.getenv("LLM_REQUEST_RETRY_SECONDS", "3600"))
+    start = time.time()
+    while True:
+        llm_hostname = get_llm_server_hostname()
+        print(llm_hostname)
+        server_url = f"http://{llm_hostname}:{PORT}/generate"
+        try:
+            response = requests.post(server_url, headers=headers, json=payload)
+            if response.status_code == 200:
+                output_txt = response.json().get("generated_text", "No output received.")
+                print(f'{response.json().get("response_time_sec", "-1")} sec')
+                if return_gen is False:
+                    return output_txt
+                else:
+                    return output_txt, generate_text
             print(f"Error: {response.status_code}")
             print(response.text)
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+        if time.time() - start > retry_seconds:
             return None
-    except requests.exceptions.RequestException as e:
-        print(f"Request failed: {e}")
-        return None
+        print("Retrying LLM request in 30 s", flush=True)
+        time.sleep(30)
 
 def submit_deepseek_local(prompt, max_new_tokens=850, temperature=0.2, top_p=0.15, server_url=None, return_gen=False):
     if server_url is None:

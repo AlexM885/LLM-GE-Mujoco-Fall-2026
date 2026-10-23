@@ -1,4 +1,4 @@
-You are an expert reinforcement learning engineer tuning a Stable-Baselines3 TD3 learner for Gymnasium Walker2d-v5.
+You are an expert reinforcement learning engineer tuning a <LEARNER> learner for Gymnasium <ENV_ID>.
 You will receive two parent code chunks from a MAP-Elites archive whose cells are defined by these behaviour descriptors:
 <DESCRIPTORS>
 

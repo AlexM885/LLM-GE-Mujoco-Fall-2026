@@ -8,6 +8,15 @@ import yaml
 #: Root directory of the repository (auto-detected from this file's location)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+#: Run options (robot, seed, search method) live in run_options.py, shared with
+#: run_mesb.py. Imported by path as well, for scripts that load this file
+#: outside the src.cfg / cfg package.
+try:
+    from .run_options import *  # noqa: F401,F403
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from run_options import *  # noqa: F401,F403
+
 #: DATA_PATH (not used for RL, kept for compatibility)
 DATA_PATH = "./cifar10"
 PACE_ICE = True
@@ -30,12 +39,15 @@ TRAIN_FILE = "sota/MujocoRL/train_rl.py"
 ISLAND_TEMP_SCRIPT = os.path.join("src", "island_temp_script_{ISLAND_NUM}.sh")
 #: Dedicated uv project used only for Mujoco RL evaluation jobs (relative path for cluster)
 MUJOCO_EVAL_PROJECT_DIR = "sota/MujocoRL/eval_env"
-#: Gymnasium environment the genes are trained and evaluated on. Walker2d is
-#: the MuJoCo counterpart of the QDWalker task in Nilsson & Cully (GECCO '21).
-#: v5 is the current revision; it fixes v4's bug of granting healthy_reward on
+#: Gymnasium environment the genes are trained and evaluated on, from ROBOT
+#: (run_options.py). Walker2d is the MuJoCo counterpart of the QDWalker task in
+#: Nilsson & Cully (GECCO '21); v5 fixes v4's bug of granting healthy_reward on
 #: the terminating unhealthy step. Do not pool v4 and v5 results: the reward
 #: accounting differs and trajectories diverge numerically within ~10 steps.
-MUJOCO_ENV_ID = os.getenv("MUJOCO_ENV_ID", "Walker2d-v5")
+MUJOCO_ENV_ID = os.getenv("MUJOCO_ENV_ID", ENV_ID)
+#: One-line description of the robot's task, filled into the mutation prompts
+#: (<ENV_ID> and <ROBOT_TASK_NOTE> in templates/Mujoco).
+ROBOT_TASK_NOTE = ROBOT_PROFILE["task_note"]
 #: Keep eval runs configurable without changing the shared project environment.
 MUJOCO_EVAL_TIMESTEPS = int(os.getenv("MUJOCO_EVAL_TIMESTEPS", "500000"))
 MUJOCO_EVAL_EPISODES = int(os.getenv("MUJOCO_EVAL_EPISODES", "10"))
@@ -153,6 +165,39 @@ EVAL_RUNLINE = (
 #: than PPO did; 6h stays under the 8h SLURM limit in PYTHON_BASH_SCRIPT_TEMPLATE.
 EVAL_NO_PROGRESS_TIMEOUT_SECONDS = int(os.getenv("LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS", str(6 * 60 * 60)))
 
+#: Seed gene and learner (SEED in run_options.py): "td3" is the default above,
+#: "xqc" switches the seed gene, prompts, rules and trainer to sota/XQC/llmge.
+#: Every process of an island reads the same SEED, so they all agree.
+if SEED == "xqc":
+    SOTA_ROOT = os.path.join(ROOT_DIR, "sota/XQC/llmge")
+    SEED_NETWORK = os.path.join(SOTA_ROOT, "network.py")
+    VARIANT_DIR = os.path.join(SOTA_ROOT, "models")
+    TRAIN_FILE = "sota/XQC/train_xqc_gene.py"
+    DEFAULT_PROMPT_GROUP = "Mujoco/XQC"
+    PROMPTS = f"templates/{DEFAULT_PROMPT_GROUP}/*.txt"
+    CONSTANT_RULES_PATH = "templates/Mujoco/XQC_ConstantRules.txt"
+    #: Per-individual budget: steps x seeds (seeds train batched in one process).
+    XQC_EVAL_TIMESTEPS = int(os.getenv("XQC_EVAL_TIMESTEPS", "100000"))
+    XQC_EVAL_SEEDS = int(os.getenv("XQC_EVAL_SEEDS", "3"))
+    FORBIDDEN_PATTERNS = [
+        ("import ", "XQC genes return plain dicts; no imports"),
+        ("open(", "file access"),
+        ("exec(", "dynamic code"),
+        ("eval(", "dynamic code"),
+        ("__", "dunder access"),
+        ("class ", "XQC genes define no classes"),
+    ]
+    # train_xqc_gene.py runs in the XQC JAX venv (sota/XQC/pace/env.sh activates it).
+    EVAL_RUNLINE = (
+        "export XQC_REPO=$PWD && source sota/XQC/pace/env.sh && python {} "
+        "-network models.{} "
+        f"-env {MUJOCO_ENV_ID} "
+        f"-timesteps {XQC_EVAL_TIMESTEPS} -num_seeds {XQC_EVAL_SEEDS} "
+        f"-eval_episodes {MUJOCO_EVAL_EPISODES}"
+    )
+    # Counted from submission, so it includes queue time.
+    EVAL_NO_PROGRESS_TIMEOUT_SECONDS = int(os.getenv("LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS", str(6 * 60 * 60)))
+
 #: LLM GPU constraint string for SLURM
 LLM_GPU = 'nvidia-gpu'
 
@@ -217,15 +262,21 @@ NUM_EOT_ELITES = 1
 GENERATION = 0
 PROB_QC = 0.0
 PROB_EOT = 0.0  # Disable EoT for initial RL runs (needs prior elite genes)
-num_generations = 30  # Number of generations
-start_population_size = 32  # Starting population size
-population_size = 32  # Population size each generation
+num_generations = int(os.getenv("LLMGE_NUM_GENERATIONS", "30"))  # Number of generations
+start_population_size = int(os.getenv("LLMGE_POP_SIZE", "32"))  # Starting population size
+population_size = int(os.getenv("LLMGE_POP_SIZE", "32"))  # Population size each generation
 crossover_probability = 0.35  # Probability of mating two individuals
 mutation_probability = 0.8  # Probability of mutating an individual
 num_elites = 8
 hof_size = 100
 max_gen_attempts = 5
-migration_gen = 5
+#: Generations between island migrations. run_improved.py stops at the next multiple
+#: of it (islands.py then migrates and relaunches); 0 = no migration, run straight to
+#: num_generations (single island, chained controller jobs resume from checkpoints).
+migration_gen = int(os.getenv("LLMGE_MIGRATION_GEN", "5"))
+#: Slurm time limit of each gene's evaluation job, passed as sbatch -t (overrides the
+#: "#SBATCH -t" line of slurm_config.yaml python_bash_script). Empty = keep the yaml's.
+GENE_JOB_TIME = os.getenv("LLMGE_GENE_TIME", "")
 """
 MAP-Elites Constants
 """
@@ -244,7 +295,8 @@ MAP_BINS = 32
 #: two feet, so the archive is 32 x 32 = 1024 niches. Both components are
 #: proportions and therefore bounded to [0, 1] by construction.
 #: foot_contact_0 / _1 are ordered by MuJoCo geom id: for Walker2d-v5 that is
-#: foot_geom (right) then foot_left_geom (left).
+#: foot_geom (right) then foot_left_geom (left); for HalfCheetah, bfoot (back)
+#: then ffoot (front). Both learners (train_rl.py, train_xqc_gene.py) write them.
 MAP_ELITES_DESCRIPTORS = [
     ("foot_contact_0", 0.0, 1.0),
     ("foot_contact_1", 0.0, 1.0),
@@ -269,16 +321,30 @@ MAP_ELITES_DESCRIPTORS = [
 #: Indicative bands: <50 falls immediately, 300-800 shuffling,
 #: 3000+ sustained locomotion.
 MAP_ELITES_OBJECTIVE = "mean_reward"
+#: Pareto-front-per-cell mode (PARETO_FRONT_PER_CELL in run_options.py; Shazeb's
+#: Multi-Objective MAP-Elites, Pierrot et al., 2022): each cell keeps a Pareto
+#: front over MOME_OBJECTIVES, at most MOME_FRONT_SIZE genes, instead of one
+#: elite. Parents are drawn by picking a filled cell uniformly, then a gene of
+#: its front uniformly. Does not work with the LLM emitters.
+PARETO_FRONT_PER_CELL_MODE = PARETO_FRONT_PER_CELL
+#: Results columns, all maximised: speed (sum of the forward reward per episode) and
+#: minus effort (sum of reward_ctrl, <= 0).
+MOME_OBJECTIVES = ["mean_return_forward", "mean_return_ctrl"]
+MOME_FRONT_SIZE = int(os.getenv("LLMGE_MOME_FRONT_SIZE", "4"))
+#: Fixed hypervolume reference point (same for every run of a robot, so
+#: hypervolume and MOQD score compare across runs): no forward progress, and the
+#: largest possible episode effort, ctrl_cost_weight * 6 actuators * 1^2 * 1000
+#: steps (6 on Walker2d, 600 on HalfCheetah).
+MOME_REFERENCE_POINT = (0.0, -ROBOT_PROFILE["max_episode_effort"])
 #: Sentinel reward that sota/MujocoRL/train_rl.py writes when a generated model
 #: cannot be built, trained or evaluated. Genes at or below it never enter the
 #: archive, so a broken model cannot occupy a niche or be drawn as a parent.
 FAILED_EVAL_SENTINEL = -999999.0
-#: QD-LLMs of Koh & Wong et al. (GECCO Companion '26). When on, an LLM
-#: allocator splits every generation's offspring between three LLM emitters,
-#: uniform, sparse and directional (Eq. 8). When off, parents are drawn
-#: uniformly from the archive and no curiosity or emitter history is kept.
-#: Set USE_LLM_EMITTERS=0 in the environment to turn it off.
-USE_LLM_EMITTERS = os.getenv("USE_LLM_EMITTERS", "1").strip().lower() not in ("0", "false", "no", "off")
+#: QD-LLMs of Koh & Wong et al. (GECCO Companion '26), USE_LLM_EMITTERS in
+#: run_options.py. When on, an LLM allocator splits every generation's
+#: offspring between three LLM emitters, uniform, sparse and directional
+#: (Eq. 8). When off, parents are drawn uniformly from the archive and no
+#: curiosity or emitter history is kept.
 #: The sparse emitter draws a cell with probability proportional to
 #:
 #:     w_c = (1 - alpha) * s_c + alpha * q_c
@@ -306,8 +372,8 @@ SPARSE_EMITTER_MIN_WEIGHT = 0.01
 #:
 #: What each descriptor means, quoted to the LLM in the directional prompt.
 MAP_ELITES_DESCRIPTOR_NOTES = {
-    "foot_contact_0": "fraction of simulation steps the right foot touches the ground",
-    "foot_contact_1": "fraction of simulation steps the left foot touches the ground",
+    f"foot_contact_{i}": f"fraction of simulation steps the {foot} touches the ground"
+    for i, foot in enumerate(ROBOT_PROFILE["foot_names"])
 }
 #: The allocator (Sec. 3.2, step 1) shows the LLM the archive size and total
 #: fitness and each emitter's success rate (archive insertions / new
