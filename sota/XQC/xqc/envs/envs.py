@@ -1,3 +1,5 @@
+import json
+import os
 import random
 
 import gymnasium as gym
@@ -11,6 +13,88 @@ from xqc.envs.humanoid_bench import HB_ALL, make_humanoid_env
 from xqc.envs.mujoco import MUJOCO_ALL, make_mujoco_env
 from xqc.envs.myosuite import MYOSUITE_TASKS, make_myosuite_env
 from xqc.envs.wrapper import RepeatAction, SinglePrecision
+
+
+#: Env var controlling optional VLM-authored auxiliary reward shaping. When
+#: set to a readable JSON cache path (produced by src/vlm_aux_reward.py),
+#: each env built by :func:`make_env` is wrapped with
+#: :class:`AuxRewardWrapper` so that TD3 / XQC training sees the shaped
+#: reward. Evaluation envs built with the paired seed+42 convention also
+#: pick up the wrapper, which is fine because the eval reward reported by
+#: the XQC trainer is still the sum of per-step rewards -- any shaping
+#: term adds to it. If you need an unshaped eval the convention is to
+#: unset the env var on the eval worker; XQC's final evaluation is a
+#: separate rollout path and is unaffected here.
+AUX_REWARD_CACHE_ENV = "LLMGE_AUX_REWARD_CACHE"
+AUX_REWARD_LAM_ENV = "LLMGE_AUX_REWARD_LAM"
+AUX_REWARD_ANNEAL_ENV = "LLMGE_AUX_REWARD_ANNEAL"
+AUX_REWARD_CENTER_ENV = "LLMGE_AUX_REWARD_CENTER"
+AUX_REWARD_PBRS_ENV = "LLMGE_AUX_REWARD_PBRS"
+AUX_REWARD_PBRS_GAMMA_ENV = "LLMGE_AUX_REWARD_PBRS_GAMMA"
+
+
+def _maybe_wrap_aux_reward(env):
+    """Return `env` wrapped with VLM aux reward if the env var is set."""
+    cache_path = os.environ.get(AUX_REWARD_CACHE_ENV)
+    if not cache_path or not os.path.isfile(cache_path):
+        return env
+    try:
+        with open(cache_path) as fh:
+            payload = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        print("[aux_reward] could not read {} ({}); vanilla env".format(
+            cache_path, exc), flush=True)
+        return env
+    code = payload.get("aux_reward_code")
+    if not isinstance(code, str) or not code.strip():
+        return env
+    try:
+        from xqc.envs.aux_reward_sandbox import (
+            AuxRewardSandboxError, load_aux_reward)
+        from xqc.envs.aux_reward_wrapper import AuxRewardWrapper
+        aux_fn = load_aux_reward(code)
+    except Exception as exc:  # pylint: disable=broad-except
+        print("[aux_reward] sandbox rejected snippet ({}); vanilla env".format(exc),
+              flush=True)
+        return env
+
+    def _resolve_float(name, cache_value, default):
+        v = os.environ.get(name)
+        if v is not None:
+            try:
+                return float(v)
+            except ValueError:
+                pass
+        if isinstance(cache_value, (int, float)):
+            return float(cache_value)
+        return float(default)
+
+    def _resolve_int(name, cache_value):
+        v = os.environ.get(name)
+        if v is not None:
+            try:
+                return int(v)
+            except ValueError:
+                pass
+        if isinstance(cache_value, (int, float)):
+            return int(cache_value)
+        return None
+
+    lam = _resolve_float(AUX_REWARD_LAM_ENV, payload.get("lam"), 0.1)
+    anneal = _resolve_int(AUX_REWARD_ANNEAL_ENV, payload.get("anneal_steps"))
+    anneal = anneal if anneal and anneal > 0 else None
+    center = os.environ.get(AUX_REWARD_CENTER_ENV, "").lower() in (
+        "1", "true", "yes", "on")
+    pbrs = os.environ.get(AUX_REWARD_PBRS_ENV, "").lower() in (
+        "1", "true", "yes", "on")
+    pbrs_gamma = _resolve_float(AUX_REWARD_PBRS_GAMMA_ENV, None, 0.99)
+    print("[aux_reward] wrapping env with lam={}, anneal={}, center={}, pbrs={}, "
+          "gamma={}; snippet from {} model={}".format(
+              lam, anneal, center, pbrs,
+              pbrs_gamma if pbrs else "-", cache_path,
+              payload.get("model_id")), flush=True)
+    return AuxRewardWrapper(env, aux_fn, lam=lam, anneal_steps=anneal,
+                            center=center, pbrs=pbrs, pbrs_gamma=pbrs_gamma)
 
 
 def resolve_env_benchmark(env_name: str) -> str:
@@ -52,6 +136,7 @@ def make_env(env_name: str, seed: int = 0, action_repeat=1) -> gym.Env:
     if action_repeat > 1:
         env = RepeatAction(env, action_repeat)
 
+    env = _maybe_wrap_aux_reward(env)
     return env
 
 

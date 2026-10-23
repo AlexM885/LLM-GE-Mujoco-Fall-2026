@@ -1,0 +1,19 @@
+Your previous aux_reward snippet was rejected by the sandbox with this
+error:
+
+    <<ERROR>>
+
+Fix only the specific issue and re-emit the same JSON object. All other
+sandbox rules from the first prompt still apply:
+- Exactly one top-level function ``def aux_reward(obs, action, info)``
+- No imports, exec, open, dunders, classes, nested funcs, lambdas, loops,
+  comprehensions, with/try/raise/assert, yield/await, deletes, decorators.
+- Only np.* in the whitelist and the builtins {abs, float, int, len, min,
+  max, range, sum}.
+- Must contain an explicit ``return <float>``.
+
+Your previous response (for context):
+
+    <<PREVIOUS_RESPONSE>>
+
+Return a corrected JSON object, nothing else.
