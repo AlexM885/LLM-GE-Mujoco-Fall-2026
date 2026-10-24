@@ -1358,7 +1358,9 @@ def parse_allocation(reply, n):
     """
     if not reply:
         return None
-    for match in reversed(re.findall(r"\{[^{}]*\}", reply)):
+    # Llama sometimes escapes the quotes, e.g. $\boxed{"{\\"uniform\\": 11, ...}"}$;
+    # the counts are plain numbers, so backslashes can simply be dropped.
+    for match in reversed(re.findall(r"\{[^{}]*\}", reply.replace("\\", ""))):
         try:
             data = json.loads(match)
             raw = {emitter: max(0.0, float(data.get(emitter, 0))) for emitter in EMITTERS}
