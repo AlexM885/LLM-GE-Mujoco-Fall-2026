@@ -6,13 +6,42 @@ import importlib
 import gymnasium as gym
 import numpy as np
 import time
+import hashlib
+import re
 from stable_baselines3 import TD3
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.utils import set_random_seed
-from eval import evaluate_model, make_env, validate_reward_spec, DEFAULT_ENV_ID
+from eval import (evaluate_model, evaluation_protocol, make_env, validate_reward_spec,
+                  DEFAULT_ENV_ID)
+
+# Failure kinds written to the stats JSON. The uncertain-QD driver uses them
+# to tell failures caused by the candidate (no retry; the gene is ineligible)
+# from failures caused by the platform (retried with the same seeds). See
+# src/uqd/stats.py. The legacy pipeline ignores them and reads the CSV.
+CANDIDATE_FAILURE_KINDS = ("gene_build_error", "nonfinite_training", "unclassified_runtime_error")
+INFRA_FAILURE_KINDS = ("fitness_spec_mismatch", "resource_error")
 
 
-def write_failure_results(gene_id, start_time, message, stats_dir=None, seed=0):
+def classify_exception(exc):
+    """Best-effort split of training/evaluation exceptions by cause."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if isinstance(exc, (MemoryError, OSError)) or "out of memory" in text or "cuda error" in text:
+        return "resource_error"
+    if re.search(r"\b(nan|inf|infinity|non-?finite)\b", text):
+        return "nonfinite_training"
+    return "unclassified_runtime_error"
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_failure_results(gene_id, start_time, message, stats_dir=None, seed=0,
+                          failure_kind="unclassified_runtime_error", timesteps=None):
     """Record invalid fitness for generated models that cannot be evaluated."""
     train_time = time.time() - start_time
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +62,10 @@ def write_failure_results(gene_id, start_time, message, stats_dir=None, seed=0):
                     "gene_id": gene_id,
                     "seed": seed,
                     "status": "failed",
+                    "failure_kind": failure_kind,
+                    "failure_class": ("infra_failure" if failure_kind in INFRA_FAILURE_KINDS
+                                      else "candidate_failure"),
+                    "timesteps": timesteps,
                     "error": message,
                     "train_time_sec": train_time,
                     "mean_reward": -999999.0,
@@ -57,15 +90,22 @@ def main(
     model_dir="sota/MujocoRL/trained_models",
     stats_dir="sota/MujocoRL/stats",
     seed=0,
+    eval_seed=None,
+    eval_device=None,
 ):
     start_time = time.time()
+    # Evaluation reset seeds are eval_seed + 0..N-1. Defaulting to the training
+    # seed reproduces the original protocol exactly.
+    if eval_seed is None:
+        eval_seed = seed
 
     try:
         module = importlib.import_module(f"models.network_{gene_id}")
         policy_kwargs = module.get_policy_kwargs()
         td3_kwargs = module.get_td3_kwargs()
     except Exception as e:
-        write_failure_results(gene_id, start_time, repr(e), stats_dir, seed=seed)
+        write_failure_results(gene_id, start_time, repr(e), stats_dir, seed=seed,
+                              failure_kind="gene_build_error", timesteps=timesteps)
         return
 
     # Extract the policy class and remove it from policy_kwargs
@@ -82,7 +122,8 @@ def main(
         env.close()
         write_failure_results(
             gene_id, start_time,
-            "fitness spec mismatch: " + "; ".join(problems), stats_dir, seed=seed)
+            "fitness spec mismatch: " + "; ".join(problems), stats_dir, seed=seed,
+            failure_kind="fitness_spec_mismatch", timesteps=timesteps)
         return
 
     # Seed Python's random module, NumPy, and torch (weight init happens when
@@ -116,7 +157,8 @@ def main(
         )
     except Exception as e:
         # If the LLM-generated architecture is broken, write error results and exit
-        write_failure_results(gene_id, start_time, repr(e), stats_dir, seed=seed)
+        write_failure_results(gene_id, start_time, repr(e), stats_dir, seed=seed,
+                              failure_kind="gene_build_error", timesteps=timesteps)
         env.close()
         return
 
@@ -128,9 +170,18 @@ def main(
 
     try:
         model.learn(total_timesteps=timesteps)
+        train_wall_sec = time.time() - start_time
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, f"{gene_id}_seed{seed}.zip")
         model.save(model_path)
+        checkpoint_sha256 = file_sha256(model_path)
+
+        # The uncertain-QD driver evaluates on a fixed device (CPU) so these
+        # episodes and later re-evaluations share one protocol. Unset, the
+        # policy stays on its training device as before.
+        if eval_device is not None:
+            model.policy.to(eval_device)
+        policy_device = eval_device if eval_device is not None else str(model.policy.device)
 
         # Evaluate using eval.py
         if eval_episodes is None:
@@ -142,11 +193,14 @@ def main(
         else:
             max_eval_steps = eval_max_steps
 
+        eval_start = time.time()
         mean_reward, std_reward, rewards, metrics = evaluate_model(
-            model, env, num_episodes=num_eval_episodes, max_steps=max_eval_steps, seed=seed
+            model, env, num_episodes=num_eval_episodes, max_steps=max_eval_steps, seed=eval_seed
         )
+        eval_wall_sec = time.time() - eval_start
     except Exception as e:
-        write_failure_results(gene_id, start_time, repr(e), stats_dir, seed=seed)
+        write_failure_results(gene_id, start_time, repr(e), stats_dir, seed=seed,
+                              failure_kind=classify_exception(e), timesteps=timesteps)
         env.close()
         return
     train_time = time.time() - start_time
@@ -210,6 +264,17 @@ def main(
                 "control_costs": metrics.get("control_costs", []),
                 "foot_contacts_0": metrics.get("foot_contacts_0", []),
                 "foot_contacts_1": metrics.get("foot_contacts_1", []),
+                # Per-sample bookkeeping for the uncertain-QD driver.
+                "status": "ok",
+                "eval_seed": eval_seed,
+                "eval_seeds": metrics.get("eval_seeds", []),
+                "episode_lengths": metrics.get("episode_lengths", []),
+                "eval_env_steps": metrics.get("eval_env_steps"),
+                "episodes": metrics.get("episodes", []),
+                "train_wall_sec": train_wall_sec,
+                "eval_wall_sec": eval_wall_sec,
+                "checkpoint_sha256": checkpoint_sha256,
+                "protocol": evaluation_protocol(env_id, max_eval_steps, policy_device),
             },
             f,
             indent=2,
@@ -251,6 +316,10 @@ if __name__ == "__main__":
                         help="Directory to save evaluation stats json")
     parser.add_argument("-seed", type=int, default=0,
                         help="Random seed for training and evaluation")
+    parser.add_argument("-eval_seed", type=int, default=None,
+                        help="Base reset seed for evaluation episodes (default: -seed)")
+    parser.add_argument("-eval_device", type=str, default=None,
+                        help="Move the policy to this device before evaluating (default: training device)")
     args = parser.parse_args()
 
     # Extract gene_id from module path: "models.network_XXXX" -> "XXXX"
@@ -265,4 +334,6 @@ if __name__ == "__main__":
         model_dir=args.model_dir,
         stats_dir=args.stats_dir,
         seed=args.seed,
+        eval_seed=args.eval_seed,
+        eval_device=args.eval_device,
     )

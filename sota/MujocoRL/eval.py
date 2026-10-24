@@ -27,35 +27,11 @@ from stable_baselines3 import TD3
 
 DEFAULT_ENV_ID = os.getenv("MUJOCO_ENV_ID", "Walker2d-v5")
 
-# Fitness specification for Walker2d. The episode fitness is the undiscounted
-# return over a rollout of at most 1000 steps:
-#
-#     F = sum_t ( r_forward(t) + r_healthy(t) - c_ctrl(t) )
-#
-#     r_forward = forward_reward_weight * v_x        (v_x = dx/dt)
-#     r_healthy = healthy_reward if healthy else 0
-#     c_ctrl    = ctrl_cost_weight * ||a_t||^2       (sum over the 6 torques)
-#
-# "Healthy" means torso z in healthy_z_range and torso pitch in
-# healthy_angle_range; leaving either range terminates the episode.
-#
-# These are the Gymnasium defaults, passed explicitly so the fitness function
-# is pinned in this repo rather than inherited from whatever gymnasium version
-# happens to be installed. Passing them is behaviourally a no-op today.
-#
-# NOTE: Walker2d-v4 does NOT satisfy this spec. It grants the healthy bonus on
-# the terminating unhealthy step (measured: +1.000000 where healthy is False),
-# so its returns are inflated by one healthy_reward. v5 fixes this.
-WALKER_REWARD_SPEC = {
-    "forward_reward_weight": 1.0,
-    "ctrl_cost_weight": 0.001,
-    "healthy_reward": 1.0,
-    "healthy_z_range": (0.8, 2.0),
-    "healthy_angle_range": (-1.0, 1.0),
-    "terminate_when_unhealthy": True,
-}
-#: Max rollout length T. The Gymnasium time limit is also 1000.
-WALKER_MAX_EPISODE_STEPS = 1000
+# The fitness specification (WALKER_REWARD_SPEC, WALKER_MAX_EPISODE_STEPS) and
+# the evaluation-protocol record live in protocol.py, which has no
+# dependencies so the evolution driver can read them too. They are re-exported
+# here under their original names.
+from protocol import WALKER_REWARD_SPEC, WALKER_MAX_EPISODE_STEPS, evaluation_protocol  # noqa: E402
 
 #: Indicative return bands for Walker2d, for sanity-checking a run.
 WALKER_SCORE_BANDS = (
@@ -182,7 +158,7 @@ def _feet_in_contact(env, foot_geom_ids):
     return touching
 
 
-def evaluate_model(model, env, num_episodes=10, max_steps=1000, seed=None):
+def evaluate_model(model, env, num_episodes=10, max_steps=1000, seed=None, seeds=None):
     """
     Run evaluation episodes on a trained model.
 
@@ -200,6 +176,9 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000, seed=None):
         Base seed for episode resets. Episode ``ep`` is reset with
         ``seed + ep`` so episodes differ from each other but are identical
         across runs with the same seed. ``None`` leaves resets unseeded.
+    seeds : list[int], optional
+        Explicit reset seed for every episode; overrides ``seed`` and sets
+        ``num_episodes`` to ``len(seeds)``.
 
     Returns
     -------
@@ -213,8 +192,13 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000, seed=None):
         Behaviour metrics. ``foot_contact_<i>`` are the MAP-Elites descriptors
         (proportion of steps foot i touched the ground, averaged over
         episodes); ``mean_distance`` and ``mean_control_cost`` are reported for
-        analysis but are not descriptors.
+        analysis but are not descriptors. ``episodes`` holds one record per
+        episode (reset seed, return, length, termination, a non-finite flag
+        and the per-episode descriptor) for per-sample bookkeeping.
     """
+    if seeds is not None:
+        seeds = [int(s) for s in seeds]
+        num_episodes = len(seeds)
     foot_geom_ids, foot_geom_names = get_foot_geom_ids(env)
     if foot_geom_names:
         print(f"  Tracking foot contact for: {', '.join(foot_geom_names)}")
@@ -231,13 +215,25 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000, seed=None):
     decomposition_error = 0.0
     # Per-episode contact proportion, one list per foot.
     contact_fractions = [[] for _ in foot_geom_ids]
+    episode_records = []
 
     for ep in range(num_episodes):
-        if seed is not None:
-            obs, reset_info = env.reset(seed=seed + ep)
+        if seeds is not None:
+            reset_seed = seeds[ep]
+        elif seed is not None:
+            reset_seed = seed + ep
+        else:
+            reset_seed = None
+        if reset_seed is not None:
+            obs, reset_info = env.reset(seed=reset_seed)
         else:
             obs, reset_info = env.reset()
         done = False
+        terminated = truncated = False
+        # Set when the policy or simulation produced a non-finite number. The
+        # rollout itself is unchanged; the flag lets the caller treat the
+        # episode as a candidate failure instead of a fitness value.
+        nonfinite = not bool(np.all(np.isfinite(obs)))
         total_reward = 0
         step_count = 0
         start_x = _get_x_position(env, reset_info)
@@ -250,7 +246,11 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000, seed=None):
 
         while not done and step_count < max_steps:
             action, _ = model.predict(obs, deterministic=True)
+            if not np.all(np.isfinite(action)):
+                nonfinite = True
             obs, reward, terminated, truncated, info = env.step(action)
+            if not (np.isfinite(reward) and np.all(np.isfinite(obs))):
+                nonfinite = True
             done = terminated or truncated
             total_reward += reward
             step_count += 1
@@ -296,6 +296,16 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000, seed=None):
             decomposition_error = max(decomposition_error, ep_term_error)
         for i, fraction in enumerate(ep_contact_fraction):
             contact_fractions[i].append(float(fraction))
+        episode_records.append({
+            "seed": reset_seed,
+            "return": float(total_reward),
+            "length": int(step_count),
+            "terminated": bool(terminated),
+            "truncated": bool(truncated),
+            "nonfinite": bool(nonfinite),
+            "descriptor": {f"foot_contact_{i}": float(f)
+                           for i, f in enumerate(ep_contact_fraction)},
+        })
 
         contact_str = "  ".join(
             f"foot{i} = {f:5.3f}" for i, f in enumerate(ep_contact_fraction))
@@ -324,6 +334,10 @@ def evaluate_model(model, env, num_episodes=10, max_steps=1000, seed=None):
         "mean_return_ctrl": float(np.mean(returns_ctrl)) if returns_ctrl else 0.0,
         "reward_decomposition_error": float(decomposition_error),
         "score_band": describe_score(mean_reward),
+        "episodes": episode_records,
+        "episode_lengths": [r["length"] for r in episode_records],
+        "eval_seeds": [r["seed"] for r in episode_records],
+        "eval_env_steps": int(sum(r["length"] for r in episode_records)),
     }
     if returns_forward:
         recombined = (metrics["mean_return_forward"]

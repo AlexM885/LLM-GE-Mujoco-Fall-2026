@@ -27,7 +27,10 @@ VARIANT_DIR = os.path.join(SOTA_ROOT, "models")
 SLURM_OUTPUT_PATH = "run_job_outputs/"
 #: The training/evaluation script for RL (relative path for cluster compatibility)
 TRAIN_FILE = "sota/MujocoRL/train_rl.py"
-ISLAND_TEMP_SCRIPT = os.path.join("src", "island_temp_script_{ISLAND_NUM}.sh")
+#: Overridable so concurrent runs (scripts/uqd_sweep.py) do not overwrite each
+#: other's island scripts; must keep the {ISLAND_NUM} slot.
+ISLAND_TEMP_SCRIPT = os.getenv("LLMGE_ISLAND_TEMP_SCRIPT",
+                               os.path.join("src", "island_temp_script_{ISLAND_NUM}.sh"))
 #: Dedicated uv project used only for Mujoco RL evaluation jobs (relative path for cluster)
 MUJOCO_EVAL_PROJECT_DIR = "sota/MujocoRL/eval_env"
 #: Gymnasium environment the genes are trained and evaluated on. Walker2d is
@@ -272,6 +275,42 @@ MAP_ELITES_OBJECTIVE = "mean_reward"
 #: cannot be built, trained or evaluated. Genes at or below it never enter the
 #: archive, so a broken model cannot occupy a niche or be drawn as a parent.
 FAILED_EVAL_SENTINEL = -999999.0
+
+"""
+Uncertain-QD (noise-handling) Constants
+"""
+from .uqd_presets import resolve_uqd_config  # noqa: E402
+
+#: Named configuration from src/cfg/uqd_presets.py. "legacy_baseline" keeps
+#: the original archive code path in run_improved.py unchanged; every other
+#: preset runs the src/uqd engine. See sota/MujocoRL/UQD.md.
+MUJOCO_UQD_PRESET = os.getenv("MUJOCO_UQD_PRESET", "legacy_baseline")
+#: Optional JSON merged on top of the preset (a search change relabels it exp_).
+MUJOCO_UQD_OVERRIDES = os.getenv("MUJOCO_UQD_OVERRIDES", "")
+#: Experiment replicate seed for engine presets: seeds the search RNG and
+#: derives training and rollout seeds (src/uqd/seeds.py). The legacy preset
+#: keeps using MUJOCO_EVAL_SEED and an unseeded search.
+MUJOCO_RUN_SEED = int(os.getenv("MUJOCO_RUN_SEED", "0"))
+UQD_CONFIG = resolve_uqd_config(MUJOCO_UQD_PRESET, MUJOCO_UQD_OVERRIDES, population_size=population_size)
+#: Where engine runs keep config, seeds, events, snapshots, checkpoints and costs.
+UQD_RUN_DIR = os.getenv(
+    "MUJOCO_UQD_RUN_DIR",
+    os.path.join(ROOT_DIR, OUTPUT_DIR, "uqd", f"{UQD_CONFIG['name']}_seed{MUJOCO_RUN_SEED}"))
+#: CPU job for re-evaluating frozen checkpoints (rollouts only, no GPU).
+#: {output} and {command} are filled in by src/uqd/executors.SlurmExecutor.
+REEVAL_BASH_SCRIPT_TEMPLATE = """#!/bin/bash
+#SBATCH --job-name=uqdReeval
+#SBATCH -t 4:00:00
+#SBATCH -c 4
+#SBATCH --mem 8G
+#SBATCH -N 1
+#SBATCH --output={output}
+echo "Launching rollout re-evaluation"
+hostname
+module load uv
+unset VIRTUAL_ENV
+{command}
+"""
 
 """
 Misc. Non-sense

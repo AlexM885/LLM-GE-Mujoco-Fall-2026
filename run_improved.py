@@ -40,6 +40,22 @@ MAP_ELITES_DESCRIPTORS = globals().get("MAP_ELITES_DESCRIPTORS", [])
 MAP_ELITES_OBJECTIVE = globals().get("MAP_ELITES_OBJECTIVE", "mean_reward")
 FAILED_EVAL_SENTINEL = globals().get("FAILED_EVAL_SENTINEL", -999999.0)
 
+# Uncertain-QD engine (src/uqd). Only the Mujoco constants define UQD_CONFIG;
+# the legacy_baseline preset (the default) keeps the original archive code
+# below untouched, and every other preset routes evaluation, archive
+# insertion, re-evaluation and parent selection through the engine.
+UQD_CONFIG = globals().get("UQD_CONFIG")
+USE_UQD_ENGINE = bool(USE_MAP_ELITES and UQD_CONFIG
+                      and UQD_CONFIG["archive_strategy"] != "legacy_map_elites")
+UQD_ENGINE = None
+UQD_INDIVIDUALS = {}
+if USE_UQD_ENGINE:
+    import shlex
+    from src.uqd.engine import UQDEngine, ELIGIBLE
+    from src.uqd.executors import (LocalExecutor, SlurmExecutor, run_rollouts_with_retries,
+                                   run_train_specs_with_retries)
+    from src.uqd.mujoco import evaluation_protocol as uqd_evaluation_protocol
+
 def print_ancestry(data):
     for gene in data.keys():
         print(f'gene: {gene}')
@@ -972,7 +988,10 @@ def save_checkpoint(gen, folder_name="checkpoints", global_path=None, checkpoint
             "population": population,
             "hof": hof, 
             "MAP_ELITES_ARCHIVE": MAP_ELITES_ARCHIVE,
+            "UQD_RUN_DIR": UQD_RUN_DIR if USE_UQD_ENGINE else None,
         }
+        if USE_UQD_ENGINE:
+            uqd_save_random_state()
     filename = os.path.join(folder_name, f'checkpoint_gen_{gen}.pkl')
     with open(filename, 'wb') as file:
         pickle.dump(checkpoint_data, file)
@@ -1117,6 +1136,151 @@ def create_population(n, llm_model):
     individual_func = partial(toolbox.individual, llm_model=llm_model)
     return tools.initRepeat(list, individual_func, n)
 
+# --- Uncertain-QD engine bridge (USE_UQD_ENGINE only) --- #
+def _uqd_train_template():
+    """The gene-evaluation sbatch script from slurm_config.yaml, with its
+    output path and command slot opened up for src/uqd/executors."""
+    template = load_yaml()['python_bash_script']
+    template = re.sub(r"#SBATCH --output=\S+", "#SBATCH --output={output}", template)
+    return template.replace("{}", "{command}", 1)
+
+def uqd_executors():
+    python_cmd = shlex.split(UV_PYTHON)
+    # The job templates already `unset VIRTUAL_ENV`; calling `env` itself can
+    # pick up a broken shim earlier on PATH, so drop that prefix here.
+    if python_cmd[:3] == ["env", "-u", "VIRTUAL_ENV"]:
+        python_cmd = python_cmd[3:]
+    jobs = os.path.join(UQD_RUN_DIR, "jobs")
+    if LOCAL:
+        local = LocalExecutor(ROOT_DIR, jobs, python_cmd=python_cmd)
+        return local, local
+    train = SlurmExecutor(ROOT_DIR, jobs, _uqd_train_template(), python_cmd=python_cmd,
+                          timeout=EVAL_NO_PROGRESS_TIMEOUT_SECONDS, poll_interval=60)
+    rollout = SlurmExecutor(ROOT_DIR, jobs, REEVAL_BASH_SCRIPT_TEMPLATE, python_cmd=python_cmd,
+                            poll_interval=60)
+    return train, rollout
+
+def uqd_start(start_population_size, checkpoints_dir):
+    """Create (or reload) the engine and seed the search RNG.
+
+    One run directory belongs to one island: migration would bring in
+    individuals the engine never evaluated, so engine presets are
+    single-island and a second island pointing at the same directory fails.
+    """
+    global UQD_ENGINE
+    state_path = os.path.join(UQD_RUN_DIR, "engine_state.pkl")
+    rng_path = os.path.join(UQD_RUN_DIR, "search_random_state.pkl")
+    owner_path = os.path.join(UQD_RUN_DIR, "island_owner.txt")
+    owner = os.path.abspath(str(checkpoints_dir))
+    if os.path.exists(owner_path):
+        with open(owner_path) as f:
+            recorded = f.read().strip()
+        if recorded != owner:
+            raise RuntimeError(f"{UQD_RUN_DIR} belongs to island {recorded}; engine presets run one island "
+                               "per MUJOCO_UQD_RUN_DIR")
+    else:
+        os.makedirs(UQD_RUN_DIR, exist_ok=True)
+        with open(owner_path, "w") as f:
+            f.write(owner + "\n")
+    if os.path.exists(state_path):
+        UQD_ENGINE = UQDEngine.load_state(state_path)
+        if UQD_ENGINE.cfg != UQD_CONFIG:
+            raise RuntimeError(f"{UQD_RUN_DIR} was started with a different UQD configuration")
+        if os.path.exists(rng_path):
+            with open(rng_path, "rb") as f:
+                random.setstate(pickle.load(f))
+        box_print(f"UQD ENGINE RESUMED: {UQD_CONFIG['name']} gen {UQD_ENGINE.generation}")
+        return
+    protocol = uqd_evaluation_protocol(MUJOCO_ENV_ID, MUJOCO_EVAL_MAX_STEPS)
+    UQD_ENGINE = UQDEngine(UQD_CONFIG, MAP_ELITES_DESCRIPTORS, MAP_BINS, MUJOCO_RUN_SEED, protocol,
+                           run_dir=UQD_RUN_DIR, initial_population_size=start_population_size)
+    UQD_ENGINE.write_run_metadata(ROOT_DIR, extra={
+        "driver": "run_improved.py", "training_timesteps": MUJOCO_EVAL_TIMESTEPS,
+        "num_generations": num_generations, "population_size": population_size,
+        "start_population_size": start_population_size, "llm_model": globals().get("LLM_MODEL")})
+    random.seed(UQD_ENGINE.seeds.search_seed())
+    box_print(f"UQD ENGINE STARTED: {UQD_CONFIG['name']} (run seed {MUJOCO_RUN_SEED})")
+
+def uqd_save_random_state():
+    with open(os.path.join(UQD_RUN_DIR, "search_random_state.pkl"), "wb") as f:
+        pickle.dump(random.getstate(), f)
+
+def uqd_individual(gene_id):
+    """The DEAP individual for an evaluated gene, with its engine estimate."""
+    ind = UQD_INDIVIDUALS.get(gene_id)
+    if ind is None:
+        ind = creator.Individual([gene_id])
+        UQD_INDIVIDUALS[gene_id] = ind
+    sid = UQD_ENGINE.solution_for_gene(gene_id)
+    sol = UQD_ENGINE.solutions.get(sid) if sid else None
+    if sol is not None and sol.status == ELIGIBLE:
+        ind.fitness.values = (UQD_ENGINE.fitness_of(sid), float(sol.param_count or 0))
+    else:
+        ind.fitness.values = INVALID_FITNESS_MAX
+    return ind
+
+def uqd_population():
+    return [uqd_individual(UQD_ENGINE.gene_of(sid)) for sid in UQD_ENGINE.archive.members()]
+
+def uqd_evaluate(individuals, generation, plan):
+    """Train/evaluate new genes through the engine and set their fitness.
+
+    Genes the LLM failed to produce (no model file) are not candidates: they
+    get the invalid fitness and are logged, with no engine record or cost.
+    Unmutated clones keep their parent's gene id and are not re-trained.
+    """
+    train_exec, _ = uqd_executors()
+    specs = []
+    for ind in individuals:
+        gene_id = ind[0]
+        model_file = f'{VARIANT_DIR}/{MODEL}_{gene_id}.py'
+        if not GLOBAL_DATA.get(gene_id, {}).get('sub_flag', True) or not os.path.isfile(model_file):
+            UQD_ENGINE.log("llm_generation_failed", gene=gene_id)
+            ind.fitness.values = INVALID_FITNESS_MAX
+            continue
+        specs.extend(UQD_ENGINE.register_offspring(gene_id, generation, plan["samples_per_offspring"]))
+    run_train_specs_with_retries(
+        UQD_ENGINE, train_exec, specs, generation, UQD_CONFIG["infra"]["max_retries"],
+        timesteps=MUJOCO_EVAL_TIMESTEPS, env_id=MUJOCO_ENV_ID, eval_max_steps=MUJOCO_EVAL_MAX_STEPS,
+        model_dir=os.path.join(UQD_RUN_DIR, "models"), stats_dir=os.path.join(UQD_RUN_DIR, "stats"))
+    for ind in individuals:
+        gene_id = ind[0]
+        sid = UQD_ENGINE.solution_for_gene(gene_id)
+        if sid is None:
+            continue
+        UQD_INDIVIDUALS[gene_id] = ind
+        uqd_individual(gene_id)
+        entry = GLOBAL_DATA.setdefault(gene_id, {'sub_flag': True, 'job_id': 'None', 'start_time': time.time()})
+        entry['status'] = 'completed'
+        entry['fitness'] = tuple(ind.fitness.values)
+        sol = UQD_ENGINE.solutions[sid]
+        entry['uqd_status'] = sol.status
+        if sol.status == ELIGIBLE:
+            est = UQD_ENGINE.estimate(sid)
+            entry['metrics'] = {MAP_ELITES_OBJECTIVE: est.fitness_mean, "uqd_samples": est.n,
+                                **{name: v for (name, _, _), v in zip(MAP_ELITES_DESCRIPTORS, est.descriptor_mean)}}
+
+def uqd_reevaluate(generation):
+    requests = UQD_ENGINE.reeval_requests(generation)
+    if not requests:
+        return
+    box_print(f"UQD RE-EVALUATING {len(requests)} ARCHIVED POLICIES", print_bbox_len=60, new_line_end=False)
+    _, rollout_exec = uqd_executors()
+    run_rollouts_with_retries(UQD_ENGINE, rollout_exec, requests, generation,
+                              UQD_CONFIG["infra"]["max_retries"], label=f"reeval_g{generation}")
+    UQD_ENGINE.apply_reevaluation(generation)
+
+def uqd_initial_population(llm_model):
+    plan = UQD_ENGINE.plan_generation(0, initial=True)
+    pop = toolbox.population(n=plan["offspring"], llm_model=llm_model)
+    box_print("Batch Checking Created Genes", print_bbox_len=60, new_line_end=False)
+    delayed_creation_check(pop)
+    uqd_evaluate(pop, 0, plan)
+    UQD_ENGINE.insert_offspring([ind[0] for ind in pop], 0)
+    UQD_ENGINE.end_generation(0)
+    uqd_save_random_state()
+    return uqd_population() or pop
+
 # Define the problem
 creator.create("FitnessMulti", base.Fitness, weights=FITNESS_WEIGHTS)  # Adjust weights as needed
 creator.create("Individual", list, fitness=creator.FitnessMulti, file_id=None)
@@ -1169,6 +1333,8 @@ if __name__ == "__main__":
         exit(1)
 
     population_data, start_gen, global_data = load_checkpoint(folder_name=args.checkpoints, global_path=args.global_path)
+    if USE_UQD_ENGINE:
+        uqd_start(start_population_size, args.checkpoints)
     if population_data:
         box_print("CHECKPOINT LOADED")
         GLOBAL_DATA = global_data["GLOBAL_DATA"]
@@ -1177,6 +1343,20 @@ if __name__ == "__main__":
         population = population_data["population"]
         hof = population_data["hof"]
         MAP_ELITES_ARCHIVE = population_data.get("MAP_ELITES_ARCHIVE", {})
+        if USE_UQD_ENGINE:
+            for ind in population:
+                UQD_INDIVIDUALS[ind[0]] = ind
+    elif USE_UQD_ENGINE:
+        hof = tools.ParetoFront()
+        if UQD_ENGINE.solutions:
+            # Engine state survived but the DEAP checkpoint did not: continue
+            # from the engine instead of evaluating a second generation 0.
+            start_gen = UQD_ENGINE.generation + 1
+            population = uqd_population()
+        else:
+            start_gen = 1
+            box_print("CREATING POPULATION FROM SEED CODE (UQD ENGINE)")
+            population = uqd_initial_population(llm_model)
     else:
         # Create an initial population
         start_gen = 1
@@ -1187,17 +1367,29 @@ if __name__ == "__main__":
         hof = tools.ParetoFront()
 
     # Evaluate the entire population
-    for ind in population:
-        ind.fitness.values = PLACEHOLDER_FITNESS
-        
-    check_and_update_fitness(population)
-    if USE_MAP_ELITES:
+    if USE_UQD_ENGINE:
+        # The engine already evaluated (or, on resume, restored) the archive;
+        # re-training it here would add samples outside the seed protocol.
+        population = uqd_population() or population
+    else:
+        for ind in population:
+            ind.fitness.values = PLACEHOLDER_FITNESS
+
+        check_and_update_fitness(population)
+    if USE_MAP_ELITES and not USE_UQD_ENGINE:
         box_print("SEEDING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
         update_archive(population)
     # Evolution
     for gen in range(start_gen, num_generations if migration_gen == 0 else ((start_gen + migration_gen - 1) // migration_gen) * migration_gen + 1):
         GEN_COUNT = gen
-        if USE_MAP_ELITES:
+        if USE_UQD_ENGINE and UQD_ENGINE.budget_exhausted():
+            UQD_ENGINE.finished_reason = "total_env_steps budget reached"
+            UQD_ENGINE.end_generation(UQD_ENGINE.generation)
+            box_print("UQD TOTAL INTERACTION BUDGET REACHED; STOPPING")
+            break
+        if USE_UQD_ENGINE:
+            population = uqd_population() or population
+        elif USE_MAP_ELITES:
             # The archive, not the last batch of offspring, is the live population.
             archived = list(MAP_ELITES_ARCHIVE.values())
             if archived:
@@ -1227,6 +1419,11 @@ if __name__ == "__main__":
             GLOBAL_DATA_HIST = {}
             GLOBAL_DATA_ANCESTRY = {}
             start_gen = 0
+            if USE_UQD_ENGINE:
+                population = uqd_initial_population(llm_model)
+                population = [ind for ind in population if ind.fitness.values != INVALID_FITNESS_MAX]
+                box_print("CURRENT POPULATION SIZE:", len(population))
+                continue
             population = toolbox.population(n=start_population_size, llm_model=llm_model)
             delayed_creation_check(population)
             for ind in population:
@@ -1243,7 +1440,16 @@ if __name__ == "__main__":
         box_print(f"Selection", print_bbox_len=60, new_line_end=False)
         # These bypass the mutation and cross-over so we dont lose them
 
-        if USE_MAP_ELITES:
+        if USE_UQD_ENGINE:
+            # Plan before re-evaluating (UQD Alg. 2 computes N first), then
+            # re-evaluate the archive if due, then select parents.
+            elites = []
+            uqd_plan = UQD_ENGINE.plan_generation(gen)
+            uqd_reevaluate(gen)
+            parent_genes = UQD_ENGINE.select_parents(uqd_plan["offspring"])
+            print(f"UQD: {len(parent_genes)} parents, {uqd_plan['samples_per_offspring']} samples per offspring")
+            offspring = [uqd_individual(g) for g in parent_genes]
+        elif USE_MAP_ELITES:
             # The archive already preserves the best individual per niche, so
             # there is no separate elite set to carry across the generation.
             elites = []
@@ -1320,9 +1526,18 @@ if __name__ == "__main__":
             ind.fitness.values = PLACEHOLDER_FITNESS 
 
         GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
-        check_and_update_fitness(offspring)
+        if USE_UQD_ENGINE:
+            uqd_evaluate(offspring, gen, uqd_plan)
+        else:
+            check_and_update_fitness(offspring)
         GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
-        if USE_MAP_ELITES:
+        if USE_UQD_ENGINE:
+            box_print("UPDATING UQD ARCHIVE", print_bbox_len=60, new_line_end=False)
+            UQD_ENGINE.insert_offspring([ind[0] for ind in offspring], gen)
+            snap = UQD_ENGINE.end_generation(gen)
+            print(f"\t‣ UQD archive: {snap['illusory_metrics']}")
+            population[:] = uqd_population() or offspring
+        elif USE_MAP_ELITES:
             # Offspring only survive if they win a cell of the behaviour grid.
             box_print("UPDATING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
             update_archive(offspring)

@@ -21,3 +21,7 @@ python eval.py --model path/to/model.zip --seed 0
 - The GA driver passes a seed through automatically via `MUJOCO_EVAL_SEED` in `src/cfg/constants_Mujoco.py` (env-var overridable, default `0`), threaded into `EVAL_RUNLINE`.
 
 **Exact reproducibility requires CPU.** GPU runs (CUDA/cuDNN) are not guaranteed to match bit-for-bit even with the same seed; this was verified on CPU-only PACE ICE compute nodes across 5 seeds (2–3 repetitions each), with every same-seed run matching exactly on all recorded metrics and every seed producing a distinct result.
+
+## Uncertainty handling (uncertain QD)
+
+Repeated evaluation, archive re-evaluation, Deep-Grid, Archive-sampling, Parallel-Adaptive-sampling and post-hoc ARIA are available as named presets selected with `MUJOCO_UQD_PRESET`. The default, `legacy_baseline`, keeps the behaviour described above unchanged. See [UQD.md](UQD.md) for the presets, the seed protocol, failure handling, the held-out final evaluation and run commands.
