@@ -16,7 +16,7 @@ if REPO_ROOT not in sys.path:
 from cfg.constants import *
 from utils.print_utils import box_print
 
-from llm_utils import (split_file, submit_mixtral, submit_mixtral_hf, 
+from llm_utils import (chunk_interface_problem, split_file, submit_mixtral, submit_mixtral_hf,
                        llm_code_qc, str2bool, generate_augmented_code, 
                        extract_note, clean_code_from_llm, retrieve_base_code)
 
@@ -68,6 +68,14 @@ def augment_network(input_filename='network.py', output_filename='network_x.py',
         if not valid_code:
             print(f"Rejected generated chunk: {invalid_reason}. Falling back to parent chunk.", flush=True)
             code_from_llm = code2llm.strip()
+
+    # A chunk that drops or renames the gene's functions would only fail its
+    # training job. Write no child instead: without "Job Done" the controller
+    # counts the mutation as failed and keeps the parent (no GPU job, no budget).
+    problem = chunk_interface_problem(code2llm, code_from_llm)
+    if problem:
+        print(f"Rejected generated chunk: {problem}. No child written.", flush=True)
+        return
 
     note_txt = extract_note(code2llm)
     parts[augment_idx] = f"\n{note_txt}{code_from_llm}\n"

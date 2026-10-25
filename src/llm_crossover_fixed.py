@@ -28,7 +28,8 @@ for path in (SRC_DIR, REPO_ROOT):
 
 import llm_crossover  # noqa: E402  (the team's module, unchanged)
 from cfg.constants import ROOT_DIR  # noqa: E402
-from llm_utils import extract_note, generate_augmented_code, split_file, str2bool  # noqa: E402
+from llm_utils import (chunk_interface_problem, extract_note,  # noqa: E402
+                       generate_augmented_code, split_file, str2bool)
 from utils.print_utils import box_print  # noqa: E402
 
 
@@ -60,6 +61,12 @@ def augment_network_fixed(input_filename_x, input_filename_y, output_filename,
                                             top_p, llm_model, temperature)
     if not code_from_llm:
         code_from_llm = txt2llm
+    # Same guard as llm_mutation.py: no child if the chunk breaks the gene
+    # (the controller then counts the crossover as failed and keeps the parent).
+    problem = chunk_interface_problem(x, code_from_llm)
+    if problem:
+        print(f"Rejected generated chunk: {problem}. No child written.", flush=True)
+        return
 
     note_txt = extract_note(parts_x[chunk_idx])
     parts_x[chunk_idx] = f"\n{note_txt}{code_from_llm}\n"

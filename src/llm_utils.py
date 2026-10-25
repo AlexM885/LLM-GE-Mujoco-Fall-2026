@@ -143,6 +143,41 @@ def split_file(filename):
 
     return parts
 
+def _chunk_interface(code):
+    """Top-level functions (with their argument names) and classes of a chunk."""
+    import ast
+    names = {}
+    for node in ast.parse(code).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names[node.name] = ("def", [a.arg for a in node.args.args])
+        elif isinstance(node, ast.ClassDef):
+            names[node.name] = ("class", None)
+    return names
+
+
+def chunk_interface_problem(parent_chunk, new_chunk):
+    """Why an LLM-rewritten chunk would break the gene, or None if it keeps it whole.
+
+    The rewritten chunk must parse and still define every top-level function
+    and class of the parent chunk, with the same arguments (the trainers call
+    e.g. get_xqc_kwargs() / get_td3_kwargs() by name, without arguments).
+    """
+    try:
+        parent = _chunk_interface(parent_chunk)
+    except SyntaxError:
+        return None  # nothing reliable to compare against
+    try:
+        new = _chunk_interface(new_chunk)
+    except SyntaxError as e:
+        return f"generated chunk does not parse ({e.msg}, line {e.lineno})"
+    for name, (kind, args) in parent.items():
+        if name not in new:
+            return f"generated chunk no longer defines {name}"
+        if new[name] != (kind, args):
+            return f"generated chunk changed the signature of {name} ({new[name][1]} instead of {args})"
+    return None
+
+
 def str2bool(v):
     if isinstance(v, bool):
         return v
