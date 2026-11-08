@@ -41,6 +41,7 @@ RESUME_MUTABLE_KEYS = {
     "eval_interval", "eval_episodes", "log_interval", "log_interval_condition_number",
     "eval_video", "eval_video_fps", "eval_video_frameskip", "eval_video_num_envs", "wandb",
     "final_descriptors", "final_video", "video_steps", "final_checkpoint", "save_actor",
+    "replay_buffer_on_device",
 }
 
 EVAL_FIELDS = ["env", "seed", "env_step", "return", "wall_time_s", "slurm_job_id"]
@@ -110,7 +111,7 @@ def main(cfg: DictConfig):
 
         from xqc import checkpoint
         from xqc.agents import XQCLearner
-        from xqc.replay_buffer import ParallelReplayBuffer
+        from xqc.replay_buffer import DeviceReplayBuffer, ParallelReplayBuffer
         from xqc.envs import ParallelEnv
         from xqc.normalization import RewardNormalizer
         import xqc.logging
@@ -155,7 +156,8 @@ def main(cfg: DictConfig):
 
         discount = xqc.utils.get_discount(env.max_episode_steps, cfg.env.action_repeat)
 
-        replay_buffer = ParallelReplayBuffer(
+        buffer_class = DeviceReplayBuffer if cfg.get("replay_buffer_on_device") else ParallelReplayBuffer
+        replay_buffer = buffer_class(
             env.observation_space,
             env.action_space,
             capacity=cfg.replay_buffer_size,

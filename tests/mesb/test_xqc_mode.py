@@ -89,27 +89,39 @@ def test_adapter_is_python39_syntax():
     ast.parse(Path(adapter.__file__).read_text(), feature_version=(3, 9))
 
 
-def test_adapter_command_matches_shazebs_trainer():
-    """train_gene_xqc.py must call train_xqc.py the way train_xqc_gene.py does."""
+def test_adapter_command_matches_shazebs_trainer(monkeypatch):
+    """train_gene_xqc.py must call train_xqc.py the way train_xqc_gene.py does:
+    both take their run settings from train_xqc_gene.gene_run_overrides()."""
+    monkeypatch.delenv("LLMGE_XQC_EVAL_INTERVAL", raising=False)
+    monkeypatch.delenv("LLMGE_XQC_REPLAY_ON_DEVICE", raising=False)
     his = C.XQC_GENE_VALIDATOR.read_text()
-    for fragment in ('f"env={args.env}"', 'f"num_seeds={args.num_seeds}"',
-                     'f"max_steps={args.timesteps}"', 'f"eval_interval={eval_interval}"',
-                     'f"eval_episodes={args.eval_episodes}"',
-                     'f"start_training={min(5000, args.timesteps // 2)}"',
-                     '"checkpoint_interval=0"', '"save_replay_buffer=false"',
-                     '"final_descriptors=true"', '"resume=never"',
-                     "eval_interval = min(25_000, args.timesteps)"):
-        assert fragment in his, f"Shazeb's trainer changed: {fragment} not found"
+    assert "*gene_run_overrides(args.timesteps, args.eval_episodes)" in his
+    validator = adapter.load_validator()
     args = Namespace(env="HalfCheetah-v4", seed=0, num_seeds=3, timesteps=100_000,
                      eval_episodes=10, run_dir="/r")
-    cmd = adapter.xqc_command(args, ["agent.tau=0.005"], python="py")
+    cmd = adapter.xqc_command(args, ["agent.tau=0.005"], python="py", validator=validator)
     assert cmd[:2] == ["py", adapter.XQC_TRAIN]
-    assert cmd[2:] == ["env=HalfCheetah-v4", "seed=0", "num_seeds=3", "max_steps=100000",
-                       "eval_interval=25000", "eval_episodes=10", "start_training=5000",
-                       "run_dir=/r", "checkpoint_interval=0", "save_replay_buffer=false",
-                       "final_descriptors=true", "resume=never",
-                       "save_actor=true",  # actor.pkl for the VLM option, as train_xqc_gene.py
+    assert cmd[2:] == ["env=HalfCheetah-v4", "seed=0", "num_seeds=3", "run_dir=/r",
+                       "max_steps=100000",
+                       "eval_interval=100000",  # no intermediate evaluations
+                       "eval_episodes=10", "start_training=5000",
+                       "checkpoint_interval=0", "save_replay_buffer=false",
+                       "final_descriptors=true", "resume=never", "final_checkpoint=false",
+                       "save_actor=true",  # actor.pkl for the VLM option
+                       "replay_buffer_on_device=true",
                        "agent.tau=0.005"]
+
+
+def test_gene_run_overrides_env_switches(monkeypatch):
+    validator = adapter.load_validator()
+    monkeypatch.setenv("LLMGE_XQC_EVAL_INTERVAL", "25000")
+    monkeypatch.setenv("LLMGE_XQC_REPLAY_ON_DEVICE", "0")
+    overrides = validator.gene_run_overrides(100_000, 10)
+    assert "eval_interval=25000" in overrides
+    assert "replay_buffer_on_device=false" in overrides
+    # An interval past the run is clamped to the run length.
+    monkeypatch.setenv("LLMGE_XQC_EVAL_INTERVAL", "10000000")
+    assert "eval_interval=100000" in validator.gene_run_overrides(100_000, 10)
 
 
 def _descriptors(num_seeds=3, episodes=10):
