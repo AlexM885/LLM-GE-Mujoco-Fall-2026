@@ -82,7 +82,10 @@ else:
     LLM_BASH_SCRIPT_TEMPLATE = ''
     ISLANDS_BASH_SCRIPT_TEMPLATE = ''
 LOCAL_LLM = True
-HOSTNAME_DIR = os.path.join(ROOT_DIR, "hostname.log")
+#: File holding the LLM server's hostname (server.sh writes it, the controller reads it).
+#: Point LLMGE_HOSTNAME_FILE at another run's file, e.g. in shared team storage, to
+#: share one LLM server between runs instead of each run holding 2 GPUs for its own.
+HOSTNAME_DIR = os.getenv("LLMGE_HOSTNAME_FILE", os.path.join(ROOT_DIR, "hostname.log"))
 
 # Multi-island settings used by islands_wrapper.py.
 GLOBAL_DATA_PATH = "global_data"
@@ -197,7 +200,7 @@ if SEED == "xqc":
         f"-timesteps {XQC_EVAL_TIMESTEPS} -num_seeds {XQC_EVAL_SEEDS} "
         f"-eval_episodes {MUJOCO_EVAL_EPISODES}"
     )
-    # Counted from submission, so it includes queue time.
+    # Counted from when the gene's job starts running (queue time excluded).
     EVAL_NO_PROGRESS_TIMEOUT_SECONDS = int(os.getenv("LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS", str(6 * 60 * 60)))
 elif USE_VLM:
     #: Same contract and results file as train_rl.py; trains on the
@@ -289,6 +292,15 @@ migration_gen = int(os.getenv("LLMGE_MIGRATION_GEN", "5"))
 #: Slurm time limit of each gene's evaluation job, passed as sbatch -t (overrides the
 #: "#SBATCH -t" line of slurm_config.yaml python_bash_script). Empty = keep the yaml's.
 GENE_JOB_TIME = os.getenv("LLMGE_GENE_TIME", "")
+#: Genes trained side by side in one evaluation job (one GPU). On the midterm XQC config
+#: two genes per RTX 6000 gave 1.27x the throughput of one (speedtest Nov 8), and under
+#: the per-user GPU-hour cap that is 1.27x more genes at once. Raise LLMGE_GENE_TIME to
+#: match: each packed gene runs ~1.6x longer. 1 = one gene per job (the old behaviour).
+GENES_PER_JOB = max(1, int(os.getenv("LLMGE_GENES_PER_JOB", "1")))
+#: The no-progress timeout (EVAL_NO_PROGRESS_TIMEOUT_SECONDS) counts from when a gene's job
+#: starts running, so waiting in the queue never kills a gene. A job still queued after
+#: this many seconds is given up on instead (0 = wait forever).
+EVAL_MAX_QUEUE_SECONDS = int(os.getenv("LLMGE_EVAL_MAX_QUEUE_SECONDS", str(48 * 60 * 60)))
 """
 MAP-Elites Constants
 """
