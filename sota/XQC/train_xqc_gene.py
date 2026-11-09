@@ -112,20 +112,31 @@ def gene_run_overrides(timesteps, eval_episodes):
     """train_xqc.py overrides shared by every gene trainer (this file and MESB's
     sota/MujocoRL/train_gene_xqc.py), so both train a gene identically.
 
-    Speed settings, neither of which changes what is learned:
-    - Intermediate evaluations are off: only the step-1 and final evaluations
-      run (the gene's fitness comes from descriptors.json, not eval.csv).
-      LLMGE_XQC_EVAL_INTERVAL=<steps> brings them back, e.g. 25000.
+    Speed settings, none of which changes what is learned:
+    - No evaluations during or at the end of training: only the cheap step-1
+      one runs. The gene's fitness comes from descriptors.json, which rolls out
+      the final policy itself. LLMGE_XQC_EVAL_INTERVAL=<steps> brings the
+      learning curve (eval.csv) back, e.g. 25000, final evaluation included.
+    - Training metrics (train_metrics.jsonl) are computed once, at the end,
+      instead of every 10k steps.
     - The replay buffer lives on the GPU (replay_buffer_on_device; same batches).
       LLMGE_XQC_REPLAY_ON_DEVICE=0 keeps it in numpy.
+    - Compiled JAX functions are cached on disk and reused by later genes of
+      the same network shape: $XQC_RUNS/jax_cache, or LLMGE_XQC_JAX_CACHE
+      (a directory, or "off").
     """
+    curve = "LLMGE_XQC_EVAL_INTERVAL" in os.environ
     eval_interval = int(os.environ.get("LLMGE_XQC_EVAL_INTERVAL", timesteps))
     on_device = os.environ.get("LLMGE_XQC_REPLAY_ON_DEVICE", "1") == "1"
+    cache = os.environ.get("LLMGE_XQC_JAX_CACHE") or os.path.join(
+        os.environ.get("XQC_RUNS", os.path.join(LLMGE_DIR, "runs")), "jax_cache")
     return [f"max_steps={timesteps}", f"eval_interval={min(eval_interval, timesteps)}",
             f"eval_episodes={eval_episodes}", f"start_training={min(5000, timesteps // 2)}",
+            f"final_eval={'true' if curve else 'false'}", f"log_interval={timesteps}",
             "checkpoint_interval=0", "save_replay_buffer=false", "final_descriptors=true",
             "resume=never", "final_checkpoint=false", "save_actor=true",
-            f"replay_buffer_on_device={'true' if on_device else 'false'}"]
+            f"replay_buffer_on_device={'true' if on_device else 'false'}",
+            "jax_cache_dir=''" if cache == "off" else f"jax_cache_dir='{cache}'"]
 
 
 def write_results(gene_id, row, stats):

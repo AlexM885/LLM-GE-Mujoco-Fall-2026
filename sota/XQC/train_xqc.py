@@ -41,7 +41,7 @@ RESUME_MUTABLE_KEYS = {
     "eval_interval", "eval_episodes", "log_interval", "log_interval_condition_number",
     "eval_video", "eval_video_fps", "eval_video_frameskip", "eval_video_num_envs", "wandb",
     "final_descriptors", "final_video", "video_steps", "final_checkpoint", "save_actor",
-    "replay_buffer_on_device",
+    "replay_buffer_on_device", "final_eval", "jax_cache_dir",
 }
 
 EVAL_FIELDS = ["env", "seed", "env_step", "return", "wall_time_s", "slurm_job_id"]
@@ -84,7 +84,14 @@ def _truncate_logs(run_dir, env_step):
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig):
     import wandb
+    import jax
     import xqc.utils
+
+    if cfg.get("jax_cache_dir"):
+        # Compiled update/actor functions are reused by later runs of the same
+        # network shape (LLM-GE genes), so they skip recompiling.
+        os.makedirs(cfg.jax_cache_dir, exist_ok=True)
+        jax.config.update("jax_compilation_cache_dir", cfg.jax_cache_dir)
 
     xqc.utils.check_hydra_config()
 
@@ -312,7 +319,8 @@ def main(cfg: DictConfig):
 
             env_step = i * cfg.env.action_repeat
 
-            if i == 1 or i % cfg.eval_interval == 0 or i == last_i:
+            due = i == 1 or i % cfg.eval_interval == 0 or i == last_i
+            if due and not (i == last_i and not cfg.get("final_eval", True)):
                 eval_stats = eval_env.evaluate(
                     agent,
                     num_episodes=cfg.eval_episodes,

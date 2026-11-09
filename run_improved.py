@@ -70,11 +70,14 @@ def count_successful_evals(*stores):
     """Number of distinct genes whose training run finished with a real result.
 
     Genes that failed to build, train or evaluate (FAILED_EVAL_SENTINEL, or no
-    results at all) used no meaningful share of the budget and are not counted.
+    results at all) used no meaningful share of the budget and are not counted,
+    nor are duplicates that reused another gene's result without training.
     """
     successful = set()
     for store in stores:
         for gene_id, entry in store.items():
+            if entry.get('duplicate_of'):
+                continue
             metrics = entry.get('metrics')
             if metrics and metrics.get(MAP_ELITES_OBJECTIVE, FAILED_EVAL_SENTINEL) > FAILED_EVAL_SENTINEL:
                 successful.add(gene_id)
@@ -553,10 +556,113 @@ def evalModel(individual):
     # Initially, we don't have a fitness value
     return None
 
+# --- Duplicate genes --- #
+# The LLM often writes a gene that trains exactly like an earlier one (in one
+# 3-seed test, 2 of 11 trainings repeated another gene's settings and returned
+# the identical reward). Such a gene reuses the earlier result instead of being
+# trained again; it costs no budget (count_successful_evals skips it).
+# LLMGE_REUSE_DUPLICATES=0 trains every gene.
+REUSE_DUPLICATES = os.getenv("LLMGE_REUSE_DUPLICATES", "1") == "1"
+_XQC_GENE_TRAINER = None
+
+def gene_signature(gene_id):
+    """Hash of everything that decides how a gene trains, or None if unknown.
+
+    XQC genes: the validated train_xqc.py overrides (sorted), so formatting,
+    comments and key order do not matter. Other genes: the code without
+    comment-only and blank lines. Both include the evaluation command (steps,
+    seeds, env) and, with the VLM on, this generation's aux reward.
+    """
+    global _XQC_GENE_TRAINER
+    path = f'{VARIANT_DIR}/{MODEL}_{gene_id}.py'
+    try:
+        if globals().get("SEED") == "xqc":
+            if _XQC_GENE_TRAINER is None:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location(
+                    "llmge_xqc_gene_trainer", os.path.join(ROOT_DIR, "sota/XQC/train_xqc_gene.py"))
+                _XQC_GENE_TRAINER = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(_XQC_GENE_TRAINER)
+            overrides, _ = _XQC_GENE_TRAINER.gene_overrides(path)
+            body = "\n".join(sorted(overrides))
+        else:
+            with open(path) as f:
+                body = "\n".join(line.rstrip() for line in f
+                                 if line.strip() and not line.strip().startswith("#"))
+    except Exception:
+        return None  # an invalid gene: let it run and fail as usual
+    parts = [body, EVAL_RUNLINE]
+    if globals().get("USE_VLM") and VLM_AUX_REWARD_FILE and os.path.exists(VLM_AUX_REWARD_FILE):
+        with open(VLM_AUX_REWARD_FILE) as f:
+            parts.append(f.read())
+    import hashlib
+    return hashlib.sha256("\n\0".join(parts).encode()).hexdigest()
+
+def has_real_result(entry):
+    """A finished training with a real score (the test count_successful_evals uses)."""
+    metrics = entry.get('metrics')
+    return entry.get('status') == 'completed' and bool(metrics) \
+        and metrics.get(MAP_ELITES_OBJECTIVE, FAILED_EVAL_SENTINEL) > FAILED_EVAL_SENTINEL
+
+def find_original(signature, gene_id):
+    """The earlier gene with this signature that has, or will have, a result."""
+    for store in (GLOBAL_DATA, GLOBAL_DATA_HIST):
+        for other, entry in store.items():
+            if other == gene_id or entry.get('signature') != signature or entry.get('duplicate_of'):
+                continue
+            if entry.get('status') == 'running eval' or has_real_result(entry):
+                return other
+    return None
+
+def reuse_result(gene_id, original):
+    """Give gene_id the result of `original` (its results file too, for analysis)."""
+    entry = GLOBAL_DATA.get(original) or GLOBAL_DATA_HIST[original]
+    src = f'{SOTA_ROOT}/results/{original}_results.csv'
+    if os.path.exists(src):
+        import shutil
+        shutil.copyfile(src, f'{SOTA_ROOT}/results/{gene_id}_results.csv')
+    GLOBAL_DATA[gene_id].update(status='completed', fitness=entry['fitness'],
+                                metrics=dict(entry['metrics']), duplicate_of=original)
+    print(f'\t‣ Duplicate of {original}: reusing its result {entry["fitness"]}', flush=True)
+
+def submit_or_reuse(gene_id):
+    """Submit gene_id's training job, unless an identical gene already has (or
+    is about to have) a result."""
+    signature = gene_signature(gene_id) if REUSE_DUPLICATES else None
+    GLOBAL_DATA[gene_id]['signature'] = signature
+    original = find_original(signature, gene_id) if signature else None
+    if original is None:
+        submit_run(gene_id)
+        return
+    if has_real_result(GLOBAL_DATA.get(original) or GLOBAL_DATA_HIST.get(original) or {}):
+        reuse_result(gene_id, original)
+        return
+    # The original is still training: wait for it (check4results picks it up).
+    GLOBAL_DATA[gene_id].update(status='running eval', duplicate_of=original,
+                                results_job=f'duplicate of {original}', eval_start_time=time.time(),
+                                local_output=None)
+    print(f'\t‣ Duplicate of {original} (still training): waiting for its result', flush=True)
+
+def check_duplicate(gene_id):
+    """For a gene waiting on an identical one: True once it is resolved."""
+    original = GLOBAL_DATA[gene_id]['duplicate_of']
+    entry = GLOBAL_DATA.get(original) or GLOBAL_DATA_HIST.get(original) or {}
+    if entry.get('status') == 'running eval':
+        return False
+    if has_real_result(entry):
+        reuse_result(gene_id, original)
+    else:
+        # The original failed or timed out, which need not hold for this copy: train it.
+        print(f'\t‣ {original} gave no result; training duplicate {gene_id} itself', flush=True)
+        # It keeps its signature, so later copies wait on it instead.
+        GLOBAL_DATA[gene_id].pop('duplicate_of', None)
+        submit_run(gene_id)
+    return True
+
 def check4model2run(gene_id):
     print(f'Checking for: SOTA_ROOT {VARIANT_DIR}/{MODEL}_{gene_id}.py')
     check_exist = f'{VARIANT_DIR}/{MODEL}_{gene_id}.py'
-    
+
     # Check if the model file exists
     if not os.path.isfile(check_exist):
         print(f'\t☠ Model file does not exist for gene_id: {gene_id}, skipping evaluation.')
@@ -564,17 +670,9 @@ def check4model2run(gene_id):
         GLOBAL_DATA[gene_id]['fitness'] = INVALID_FITNESS_MAX
         return
 
-    model_path = os.path.join(OUTPUT_DIR, str(GENERATION), f'{gene_id}_model.txt')
-
     # Proceed only if the model hasn't been evaluated yet
-    if GLOBAL_DATA[gene_id]['status'] != 'running eval':
-        submit_run(gene_id)
-
-    print(f'Checking for: SOTA_ROOT {VARIANT_DIR}/{MODEL}_{gene_id}.py')
-    model_path = f'{VARIANT_DIR}/{MODEL}_{gene_id}.py'
-    if os.path.exists(model_path):
-        if GLOBAL_DATA[gene_id]['status'] != 'running eval':
-            submit_run(gene_id)
+    if GLOBAL_DATA[gene_id]['status'] not in ('running eval', 'completed'):
+        submit_or_reuse(gene_id)
 
 def check4results(gene_id):
     def check4error(gene_id):
@@ -599,7 +697,10 @@ def check4results(gene_id):
                 else:
                     return state
         return None
-                
+
+    if GLOBAL_DATA[gene_id].get('duplicate_of'):
+        check_duplicate(gene_id)
+        return
     job_done = check4error(gene_id)
     if job_done is True:
         out_dir = os.path.join(OUTPUT_DIR, str(GENERATION))
@@ -640,7 +741,7 @@ def check4results(gene_id):
 
 def cancel_eval_job(gene_id, reason):
     job_id = GLOBAL_DATA[gene_id].get('results_job')
-    if LOCAL or not job_id:
+    if LOCAL or not job_id or GLOBAL_DATA[gene_id].get('duplicate_of'):
         return
 
     result = subprocess.run(['scancel', str(job_id)], capture_output=True, text=True)
@@ -1839,6 +1940,11 @@ if __name__ == "__main__":
         update_archive(population)
     if not population_data:
         vlm_step(0, args.checkpoints, archive_members() if USE_MAP_ELITES else population)
+        # Checkpoint the evaluated initial population: a controller that times
+        # out during generation 1 then resumes at generation 1 instead of
+        # creating and training generation 0 all over again.
+        hof.update(population)
+        save_checkpoint(0, folder_name=args.checkpoints, global_path=args.global_path)
     # Evolution
     if migration_gen != 0:
         # Up to the next migration; islands_wrapper.py then migrates and relaunches.

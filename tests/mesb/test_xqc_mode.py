@@ -94,6 +94,7 @@ def test_adapter_command_matches_shazebs_trainer(monkeypatch):
     both take their run settings from train_xqc_gene.gene_run_overrides()."""
     monkeypatch.delenv("LLMGE_XQC_EVAL_INTERVAL", raising=False)
     monkeypatch.delenv("LLMGE_XQC_REPLAY_ON_DEVICE", raising=False)
+    monkeypatch.setenv("LLMGE_XQC_JAX_CACHE", "/runs/jax_cache")
     his = C.XQC_GENE_VALIDATOR.read_text()
     assert "*gene_run_overrides(args.timesteps, args.eval_episodes)" in his
     validator = adapter.load_validator()
@@ -105,10 +106,13 @@ def test_adapter_command_matches_shazebs_trainer(monkeypatch):
                        "max_steps=100000",
                        "eval_interval=100000",  # no intermediate evaluations
                        "eval_episodes=10", "start_training=5000",
+                       "final_eval=false",      # descriptors.json evaluates instead
+                       "log_interval=100000",   # training metrics once, at the end
                        "checkpoint_interval=0", "save_replay_buffer=false",
                        "final_descriptors=true", "resume=never", "final_checkpoint=false",
                        "save_actor=true",  # actor.pkl for the VLM option
                        "replay_buffer_on_device=true",
+                       "jax_cache_dir='/runs/jax_cache'",
                        "agent.tau=0.005"]
 
 
@@ -116,9 +120,12 @@ def test_gene_run_overrides_env_switches(monkeypatch):
     validator = adapter.load_validator()
     monkeypatch.setenv("LLMGE_XQC_EVAL_INTERVAL", "25000")
     monkeypatch.setenv("LLMGE_XQC_REPLAY_ON_DEVICE", "0")
+    monkeypatch.setenv("LLMGE_XQC_JAX_CACHE", "off")
     overrides = validator.gene_run_overrides(100_000, 10)
     assert "eval_interval=25000" in overrides
+    assert "final_eval=true" in overrides      # a learning curve includes its end point
     assert "replay_buffer_on_device=false" in overrides
+    assert "jax_cache_dir=''" in overrides
     # An interval past the run is clamped to the run length.
     monkeypatch.setenv("LLMGE_XQC_EVAL_INTERVAL", "10000000")
     assert "eval_interval=100000" in validator.gene_run_overrides(100_000, 10)

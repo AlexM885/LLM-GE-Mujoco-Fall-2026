@@ -20,6 +20,8 @@ log_interval: 10_000
 log_interval_condition_number:
 eval_interval: 50_000
 eval_episodes: 10
+final_eval: true              # false = no eval at max_steps (LLM-GE genes: descriptors.json evaluates instead)
+jax_cache_dir: ""             # directory for JAX's persistent compilation cache ("" = off)
 eval_video: false
 eval_video_fps: 30
 eval_video_frameskip: 1
