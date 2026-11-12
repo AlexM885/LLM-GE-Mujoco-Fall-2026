@@ -14,6 +14,7 @@ from src.utils.print_utils import print_population, print_scores, box_print, pri
 from src.llm_utils import split_file, retrieve_base_code, mutate_prompts
 from src.cfg.constants import *
 
+# MARK: Ancestry Tracking
 def print_ancestry(data):
     for gene in data.keys():
         print(f'gene: {gene}')
@@ -59,6 +60,7 @@ def update_ancestry(gene_id_child, gene_id_parent, ancestry, mutation_type=None,
     return ancestry
 
 
+# MARK: Prompt and Template Generation
 def generate_template(PROB_EOT, GEN_COUNT, TOP_N_GENES, SOTA_ROOT, SEED_NETWORK, ROOT_DIR):
     """
     Generates a template based on given probabilities and gene information.
@@ -117,6 +119,7 @@ def generate_template(PROB_EOT, GEN_COUNT, TOP_N_GENES, SOTA_ROOT, SEED_NETWORK,
     return template_txt, mute_type
 
 
+# MARK: LLM Job Submission
 def write_bash_script(input_filename_x=f'{SOTA_ROOT}/network.py',
                       input_filename_y=None,
                       output_filename=f'{SOTA_ROOT}/models/network_x.py',
@@ -206,6 +209,7 @@ def submit_bash(file_path, **kwargs):
 
     return successful_sub_flag, job_id, local_output
 
+# MARK: Job Status and Completion Checks
 def check_contents_for_error(contents):
     """
     Checks the output of a job for any signs of error.
@@ -276,6 +280,7 @@ def check4job_completion(job_id, local_output=None, check_interval=60, timeout=1
         time.sleep(check_interval)
         print(f'\t‣ Waiting on check4job_completion LLM job: {job_id} Time: {round(time.time() - start_time)}s', flush=True)
         
+# MARK: Individual Creation
 def generate_random_string(length=20):
     # Define the characters that can be used in the string
     characters = string.ascii_letters + string.digits
@@ -320,6 +325,7 @@ def create_individual(container, temp_min=0.05, temp_max=0.4):
         
     return individual
     
+# MARK: Model Training and Evaluation
 def submit_run(gene_id):
     def write_bash_script_py(gene_id, train_file='./sota/ExquisiteNetV2/train.py'):
         if not MACOS:
@@ -374,6 +380,7 @@ def evalModel(individual):
     # Initially, we don't have a fitness value
     return None
 
+# MARK: Fitness Collection
 def check4model2run(gene_id):
     # model_path = os.path.join(str(GENERATION), f'{gene_id}_model.txt')
     
@@ -502,6 +509,7 @@ def check_and_update_fitness(population, timeout=3600*30, loop_delay=60*30):
         time.sleep(loop_delay)  # Wait some time before checking again
         count+=1
         
+# MARK: Individual and Delayed Job Updates
 def update_individual(ind, new_gene_id, old_gene_id=None, process_success=True, process_type='Mutation'):
     """
     Update an individual based on the success or failure of a process.
@@ -626,6 +634,7 @@ def delayed_mutate_check(offspring):
                   
     return offspring
 
+# MARK: Genetic Operators
 def customCrossover(ind1, ind2):
     def combine_elements(ind1, ind2, temp_min=0.05, temp_max=0.1):
         """
@@ -756,6 +765,7 @@ def customMutation(individual, indpb, temp_min=0.02, temp_max=0.35):
                                    process_success=(not failed_process), process_type='Mutation')
     return individual
     
+# MARK: Population and Checkpoint Helpers
 def remove_duplicates(population):
     unique_individuals = []
     seen_chromosomes = set()
@@ -769,7 +779,7 @@ def remove_duplicates(population):
 
     return unique_individuals
 
-# --- Checkpoint Functions --- #
+# Checkpoint Functions
 def save_checkpoint(gen, folder_name="checkpoints"):
     os.makedirs(folder_name, exist_ok=True)
     checkpoint_data = {
@@ -805,7 +815,8 @@ def true_nsga2(pop, k):
     new_pop = tools.selTournamentDCD(pop, k) # mults of 4
     return new_pop
 
-# Error Handling 
+# MARK: DEAP Configuration
+# Error Handling
 def createPopulation():
     start_gen = 0
     box_print("CREATING POPULATION FROM SEED CODE")
@@ -835,7 +846,7 @@ LINKED_GENES = {}
 GLOBAL_DATA = {}
 GLOBAL_DATA_HIST = {}
 GLOBAL_DATA_ANCESTRY = {}
-# Main Evolution Loop
+# MARK: Main Evolution Loop
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run Generation')
     # Add arguments
