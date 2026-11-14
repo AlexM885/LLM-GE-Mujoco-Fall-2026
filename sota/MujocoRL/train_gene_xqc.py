@@ -73,19 +73,13 @@ def load_validator(path=GENE_VALIDATOR):
     return module
 
 
-def xqc_command(args, overrides, python=sys.executable):
-    """The train_xqc.py call, argument for argument as in train_xqc_gene.py."""
-    eval_interval = min(25_000, args.timesteps)
+def xqc_command(args, overrides, python=sys.executable, validator=None):
+    """The train_xqc.py call, with train_xqc_gene.py's own run settings."""
+    validator = validator or load_validator()
     return [python, XQC_TRAIN,
             "env={}".format(args.env), "seed={}".format(args.seed),
-            "num_seeds={}".format(args.num_seeds), "max_steps={}".format(args.timesteps),
-            "eval_interval={}".format(eval_interval),
-            "eval_episodes={}".format(args.eval_episodes),
-            "start_training={}".format(min(5000, args.timesteps // 2)),
-            "run_dir={}".format(args.run_dir), "checkpoint_interval=0",
-            "save_replay_buffer=false", "final_descriptors=true", "resume=never",
-            # Keep the trained actor (~1 MB): the VLM option films it.
-            "save_actor=true"] + list(overrides)
+            "num_seeds={}".format(args.num_seeds), "run_dir={}".format(args.run_dir)] \
+        + validator.gene_run_overrides(args.timesteps, args.eval_episodes) + list(overrides)
 
 
 def _tail(path, n=40):
@@ -181,13 +175,14 @@ def main(argv=None):
         print("FAILED ({}): {}".format(stage, reason), flush=True)
         return 0
 
+    validator = load_validator()
     try:
-        overrides, config = load_validator().gene_overrides(args.gene_file)
+        overrides, config = validator.gene_overrides(args.gene_file)
     except Exception as exc:  # noqa: BLE001 - an invalid gene is a failed evaluation
         return fail("invalid gene: {!r}".format(exc), "validate")
 
     os.makedirs(args.run_dir, exist_ok=True)
-    cmd = xqc_command(args, overrides)
+    cmd = xqc_command(args, overrides, validator=validator)
     print("Running:", " ".join(cmd), flush=True)
     log_path = os.path.join(args.run_dir, "train.log")
     with open(log_path, "w") as log:
