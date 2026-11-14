@@ -8,6 +8,7 @@ import random
 import pickle
 import argparse
 import itertools
+import shlex
 import subprocess
 import yaml
 import numpy as np
@@ -20,6 +21,9 @@ from functools import partial
 from src.utils.print_utils import print_population, print_scores, box_print, print_job_info
 from src.llm_utils import split_file, retrieve_base_code
 from src.step_milestones import append_milestone, due_milestones, milestone_label
+from src.generation_stats import generation_row, append_row as append_generation_stats
+from src.eval_jobs import (packed_runline, packed_gene_state, gene_output_path, pending_job_ids,
+                           update_eval_clock, job_shared_with_running_gene)
 from src.cfg.constants import *
 from src.cfg import constants
 import glob
@@ -89,6 +93,11 @@ MOME_OBJECTIVES = globals().get("MOME_OBJECTIVES", [])
 MOME_FRONT_SIZE = globals().get("MOME_FRONT_SIZE", 4)
 MOME_REFERENCE_POINT = globals().get("MOME_REFERENCE_POINT", None)
 GENE_JOB_TIME = globals().get("GENE_JOB_TIME", "")
+# Genes per evaluation job, and the longest a job may wait in the queue (constants_Mujoco.py).
+GENES_PER_JOB = globals().get("GENES_PER_JOB", 1)
+EVAL_MAX_QUEUE_SECONDS = globals().get("EVAL_MAX_QUEUE_SECONDS", 0)
+# Each gene of a packed job writes its output here, not to the job's slurm-<id>.out.
+PACKED_GENE_OUTPUT_DIR = os.path.join(SLURM_OUTPUT_PATH, "evaluation", "genes")
 # Crossover jobs run src/llm_crossover_fixed.py (Aayush's chunk-index fix: the original
 # writes the LLM's answer one chunk early, over the ALGO header of XQC genes, so 31 of 33
 # crossover children of xqc_island_run2 were invalid). LLMGE_FIX_CROSSOVER=0 restores it.
@@ -501,55 +510,92 @@ def create_individual(container, llm_model, temp_min=0.05, temp_max=0.4):
         print(f'Model Files for {gene_id} are Loaded') if job_done else print(f'Error Loading Model Files for {gene_id}', flush=True)
     return individual
 
-def submit_run(gene_id):
-    def write_bash_script_py(gene_id, train_file=f'{TRAIN_FILE}'):
-        model_file_override = RUNLINE_TMP.format(MODEL, gene_id) 
-        python_runline = EVAL_RUNLINE.format(train_file, model_file_override, VARIANT_DIR=VARIANT_DIR)
-        if "aux_reward_shell_prefix" in globals():
-            # This generation's VLM aux reward when the VLM is on; cleared otherwise.
-            python_runline = aux_reward_shell_prefix(VLM_AUX_REWARD_FILE) + python_runline
-        config = load_yaml()
-        bash_script_content = fill_template_slots(config['python_bash_script'], python_runline)
-        return bash_script_content
+def gene_runline(gene_id, train_file=f'{TRAIN_FILE}'):
+    """Shell command that trains and evaluates one gene."""
+    model_file_override = RUNLINE_TMP.format(MODEL, gene_id)
+    python_runline = EVAL_RUNLINE.format(train_file, model_file_override, VARIANT_DIR=VARIANT_DIR)
+    if "aux_reward_shell_prefix" in globals():
+        # This generation's VLM aux reward when the VLM is on; cleared otherwise.
+        python_runline = aux_reward_shell_prefix(VLM_AUX_REWARD_FILE) + python_runline
+    return python_runline
 
-    # This is for subbing the python code
-    def create_bash_file_py(file_path, gene_id, **kwargs):
-        bash_script_content = write_bash_script_py(gene_id, **kwargs)
-        with open(file_path, 'w') as file:
-            file.write(bash_script_content)
-        print(f"\t‣ Bash Script Saved to {file_path}")
+def submit_genes(gene_ids):
+    """Submit one evaluation job that trains every gene in gene_ids side by side.
 
-    def submit_bash_py(file_path, gene_id, **kwargs):
-        create_bash_file_py(file_path, gene_id, **kwargs)
-        job_id = None
-        successful_sub_flag = False
-        local_output = None
-        # Command-line options override the script's #SBATCH lines.
-        time_opt = ['-t', GENE_JOB_TIME] if GENE_JOB_TIME and not LOCAL else []
-        result = subprocess.run([RUN_COMMAND, *time_opt, file_path], capture_output=True, text=True)
-        if LOCAL:
-            local_output = result.stdout.strip() + '\n' + result.stderr.strip()
-            print("\t‣ Output:", local_output, flush=True)
-            job_id = None
-            successful_sub_flag = True
-        elif result.returncode == 0:
-            print("\t‣ Script Submitted Successfully.\n\t‣ Output:", result.stdout.strip())
-            successful_sub_flag = True
-            job_id = result.stdout.split('job ')[-1].strip()
-        else:
-            print("\t‣ Failed to Submit script.\n\t‣ Error:", result.stderr.strip())
-            successful_sub_flag = False
-            job_id = None
-        return successful_sub_flag, job_id, local_output
-    
+    One gene: the job runs its command directly, as before. Several (GENES_PER_JOB > 1):
+    each gene runs in the background with its own output file (src/eval_jobs.py).
+    """
+    if len(gene_ids) == 1:
+        python_runline = gene_runline(gene_ids[0])
+    else:
+        python_runline = packed_runline([(g, gene_runline(g)) for g in gene_ids], PACKED_GENE_OUTPUT_DIR)
+        # A leftover output file (e.g. a resubmitted gene) would look finished at once.
+        for g in gene_ids:
+            stale = gene_output_path(PACKED_GENE_OUTPUT_DIR, g)
+            if os.path.exists(stale):
+                os.remove(stale)
+    config = load_yaml()
+    bash_script_content = fill_template_slots(config['python_bash_script'], python_runline)
+
     out_dir = os.path.join(OUTPUT_DIR, str(GENERATION))
-    file_path = os.path.join(out_dir, f'{gene_id}_model.sh')
-    successful_sub_flag, job_id, local_output = submit_bash_py(file_path, gene_id)
-    GLOBAL_DATA[gene_id]['status'] = 'running eval'
-    GLOBAL_DATA[gene_id]['results_job'] = job_id
-    GLOBAL_DATA[gene_id]['eval_start_time'] = time.time()
-    GLOBAL_DATA[gene_id]['local_output'] = local_output
-    print(f'\t‣ Running py File for {gene_id}, {job_id}')
+    os.makedirs(out_dir, exist_ok=True)
+    suffix = '_model.sh' if len(gene_ids) == 1 else f'_pack{len(gene_ids)}.sh'
+    file_path = os.path.join(out_dir, f'{gene_ids[0]}{suffix}')
+    with open(file_path, 'w') as file:
+        file.write(bash_script_content)
+    print(f"\t‣ Bash Script Saved to {file_path}")
+
+    job_id = None
+    local_output = None
+    # Command-line options override the script's #SBATCH lines.
+    time_opt = ['-t', GENE_JOB_TIME] if GENE_JOB_TIME and not LOCAL else []
+    # Extra sbatch flags for gene jobs, e.g. GENE_SBATCH_FLAGS="--exclude=<bad nodes>" (same
+    # variable the sliding-boundaries driver reads).
+    extra_opt = shlex.split(os.getenv('GENE_SBATCH_FLAGS', '')) if not LOCAL else []
+    result = subprocess.run([RUN_COMMAND, *time_opt, *extra_opt, file_path], capture_output=True, text=True)
+    if LOCAL:
+        local_output = result.stdout.strip() + '\n' + result.stderr.strip()
+        print("\t‣ Output:", local_output, flush=True)
+    elif result.returncode == 0:
+        print("\t‣ Script Submitted Successfully.\n\t‣ Output:", result.stdout.strip())
+        job_id = result.stdout.split('job ')[-1].strip()
+    else:
+        print("\t‣ Failed to Submit script.\n\t‣ Error:", result.stderr.strip())
+
+    now = time.time()
+    for gene_id in gene_ids:
+        GLOBAL_DATA[gene_id]['status'] = 'running eval'
+        GLOBAL_DATA[gene_id]['results_job'] = job_id
+        GLOBAL_DATA[gene_id]['eval_start_time'] = now
+        GLOBAL_DATA[gene_id]['submit_time'] = now
+        GLOBAL_DATA[gene_id]['local_output'] = local_output
+        GLOBAL_DATA[gene_id]['packed'] = len(gene_ids) > 1
+        print(f'\t‣ Running py File for {gene_id}, {job_id}')
+
+def submit_run(gene_id):
+    submit_genes([gene_id])
+
+def submit_ready_genes(population):
+    """Packing (GENES_PER_JOB > 1): submit every gene whose model file is ready, in groups.
+
+    Runs before each pass of check_and_update_fitness, so genes reach check4model2run
+    already submitted. Genes whose model file is missing fail as they do there.
+    """
+    ready = []
+    for ind in population:
+        gene_id = ind[0]
+        data = GLOBAL_DATA.get(gene_id)
+        if not data or data.get('status') != 'subbed file' or not data.get('sub_flag', True):
+            continue
+        if ind.fitness.values != PLACEHOLDER_FITNESS:
+            continue
+        if os.path.isfile(f'{VARIANT_DIR}/{MODEL}_{gene_id}.py'):
+            # Duplicates of an earlier gene reuse (or wait for) its result instead.
+            submit_or_reuse(gene_id, submit=ready.append)
+            if ready and ready[-1] == gene_id:
+                GLOBAL_DATA[gene_id]['status'] = 'queued for pack'
+    for i in range(0, len(ready), GENES_PER_JOB):
+        submit_genes(ready[i:i + GENES_PER_JOB])
 
 def evalModel(individual):
     gene_id = individual[0]
@@ -610,7 +656,7 @@ def find_original(signature, gene_id):
         for other, entry in store.items():
             if other == gene_id or entry.get('signature') != signature or entry.get('duplicate_of'):
                 continue
-            if entry.get('status') == 'running eval' or has_real_result(entry):
+            if entry.get('status') in ('running eval', 'queued for pack') or has_real_result(entry):
                 return other
     return None
 
@@ -625,14 +671,16 @@ def reuse_result(gene_id, original):
                                 metrics=dict(entry['metrics']), duplicate_of=original)
     print(f'\t‣ Duplicate of {original}: reusing its result {entry["fitness"]}', flush=True)
 
-def submit_or_reuse(gene_id):
+def submit_or_reuse(gene_id, submit=None):
     """Submit gene_id's training job, unless an identical gene already has (or
-    is about to have) a result."""
+    is about to have) a result. submit: what to do with a gene that must train
+    (default submit_run; submit_ready_genes collects them to pack into jobs)."""
+    submit = submit or submit_run
     signature = gene_signature(gene_id) if REUSE_DUPLICATES else None
     GLOBAL_DATA[gene_id]['signature'] = signature
     original = find_original(signature, gene_id) if signature else None
     if original is None:
-        submit_run(gene_id)
+        submit(gene_id)
         return
     if has_real_result(GLOBAL_DATA.get(original) or GLOBAL_DATA_HIST.get(original) or {}):
         reuse_result(gene_id, original)
@@ -686,6 +734,16 @@ def check4results(gene_id):
                 return state
         # there is no local output, so process with slurm
         output_file = f'{SLURM_OUTPUT_PATH}evaluation/slurm-{job_id}.out'
+        if GLOBAL_DATA[gene_id].get('packed'):
+            # Several genes share this job: the gene's own file decides, and the job's
+            # output only tells us if the job died before the gene finished.
+            def read(path):
+                if not os.path.exists(path):
+                    return None
+                with open(path, 'r') as file:
+                    return file.read()
+            return packed_gene_state(read(gene_output_path(PACKED_GENE_OUTPUT_DIR, gene_id)),
+                                     read(output_file), check_contents_for_error)
         print(f"Checked Path: {output_file}")
         # Check if the output file exists
         if os.path.exists(output_file):
@@ -743,6 +801,10 @@ def cancel_eval_job(gene_id, reason):
     job_id = GLOBAL_DATA[gene_id].get('results_job')
     if LOCAL or not job_id or GLOBAL_DATA[gene_id].get('duplicate_of'):
         return
+    if job_shared_with_running_gene(GLOBAL_DATA, job_id, gene_id):
+        print(f"\t‣ Not cancelling eval job {job_id} for {gene_id}: another gene in it is still running",
+              flush=True)
+        return
 
     result = subprocess.run(['scancel', str(job_id)], capture_output=True, text=True)
     if result.returncode == 0:
@@ -770,6 +832,10 @@ def check_and_update_fitness(population, timeout=EVAL_NO_PROGRESS_TIMEOUT_SECOND
     while True:
         box_print(f"Checking Model Runs: {count}", print_bbox_len=60, new_line_end=False)
         all_done = True
+        if GENES_PER_JOB > 1:
+            submit_ready_genes(population)
+        # Jobs still in the queue: their genes' no-progress clocks don't run yet.
+        pending = None if LOCAL else pending_job_ids()
         for ind in population:
             gene_id = ind[0]
             # check if failed job
@@ -793,6 +859,14 @@ def check_and_update_fitness(population, timeout=EVAL_NO_PROGRESS_TIMEOUT_SECOND
                         print(f"LLM Failed for Gene: {gene_id}")
                         ind.fitness.values = INVALID_FITNESS_MAX 
                         GLOBAL_DATA[gene_id]['status'] = 'completed'
+                if GLOBAL_DATA[gene_id]['status'] == 'running eval' and update_eval_clock(
+                        GLOBAL_DATA[gene_id], pending, time.time(), EVAL_MAX_QUEUE_SECONDS):
+                    print(f"Gene {gene_id} waited in the queue over {EVAL_MAX_QUEUE_SECONDS} seconds")
+                    cancel_eval_job(gene_id, f"still queued after {EVAL_MAX_QUEUE_SECONDS} seconds")
+                    ind.fitness.values = INVALID_FITNESS_MAX
+                    GLOBAL_DATA[gene_id]['fitness'] = INVALID_FITNESS_MAX
+                    GLOBAL_DATA[gene_id]['status'] = 'FAILED: QUEUE TIMEOUT'
+                    continue
                 
                 
                 if GLOBAL_DATA[gene_id]['status'] == "completed":
@@ -1759,6 +1833,30 @@ def update_archive(population):
           f"({coverage:.1f}% coverage), QD-score(raw) {qd_score:.2f}")
     return updated_genes
 
+def write_generation_stats(gen, folder_name, offspring, updated_genes):
+    """Append this generation's health (trained / failed / duplicates / archive updates) to
+    <checkpoints>/generation_stats.csv (src/generation_stats.py)."""
+    try:
+        entries = [GLOBAL_DATA.get(ind[0]) or GLOBAL_DATA_HIST.get(ind[0]) or {} for ind in offspring]
+        if USE_MAP_ELITES:
+            qualities = [get_quality(ind) for ind in archive_members()]
+            cells = len(MAP_ELITES_ARCHIVE)
+        else:
+            qualities = [ind.fitness.values[0] for ind in offspring
+                         if ind.fitness.valid and tuple(ind.fitness.values) != tuple(INVALID_FITNESS_MAX)]
+            cells = 0
+        # update_archive returns the genes that entered; the MOME archive returns (entered, rejected).
+        updates = updated_genes[0] if isinstance(updated_genes, tuple) else len(updated_genes or ())
+        row = generation_row(gen, entries, qualities, cells, updates,
+                             count_successful_evals(GLOBAL_DATA, GLOBAL_DATA_HIST), INVALID_FITNESS_MAX,
+                             MAP_ELITES_OBJECTIVE, FAILED_EVAL_SENTINEL)
+        path = append_generation_stats(folder_name, row)
+        print(f"\t‣ Generation {gen}: {row['trained_ok']} trained, {row['duplicates']} duplicates, "
+              f"{row['failed']} failed, {row['timeouts']} timeouts, {row['archive_updates']} archive updates "
+              f"({path})", flush=True)
+    except Exception as e:  # statistics must never stop a run
+        print(f"\t☠ Could not write generation stats: {e!r}", flush=True)
+
 def record_milestones(gen, folder_name):
     """Snapshot the archive at every MILESTONE_TIMESTEPS steps of the budget.
 
@@ -1935,14 +2033,17 @@ if __name__ == "__main__":
         ind.fitness.values = PLACEHOLDER_FITNESS
         
     check_and_update_fitness(population)
+    seeded_genes = set()
     if USE_MAP_ELITES:
         box_print("SEEDING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
-        update_archive(population)
+        seeded_genes = update_archive(population)
     if not population_data:
+        write_generation_stats(0, args.checkpoints, population, seeded_genes)
         vlm_step(0, args.checkpoints, archive_members() if USE_MAP_ELITES else population)
-        # Checkpoint the evaluated initial population: a controller that times
-        # out during generation 1 then resumes at generation 1 instead of
-        # creating and training generation 0 all over again.
+        # Checkpoint the evaluated initial population, like every later generation:
+        # a controller that times out during generation 1 then resumes there instead
+        # of redoing generation 0 (walker_xqc_vlm_emitters lost 2 x 18 h jobs that way).
+        GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
         hof.update(population)
         save_checkpoint(0, folder_name=args.checkpoints, global_path=args.global_path)
     # Evolution
@@ -2113,6 +2214,7 @@ if __name__ == "__main__":
         GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
         check_and_update_fitness(offspring)
         GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
+        updated_genes = set()
         if USE_MAP_ELITES:
             # Offspring only survive if they win a cell of the behaviour grid.
             box_print("UPDATING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
@@ -2129,6 +2231,7 @@ if __name__ == "__main__":
         hof.update(population)
         save_checkpoint(gen, folder_name=args.checkpoints, global_path=args.global_path)
         record_milestones(gen, args.checkpoints)
+        write_generation_stats(gen, args.checkpoints, offspring, updated_genes)
         vlm_step(gen, args.checkpoints, archive_members() if USE_MAP_ELITES else population)
         if MOME:
             write_archive_csv(gen, args.checkpoints)
