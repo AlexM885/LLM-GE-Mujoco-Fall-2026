@@ -14,6 +14,7 @@ import pytest
 
 import run_mesb
 from sota.MujocoRL.mesb_logging import RunPaths
+from src.generation_stats import TIMING_COLUMNS
 
 
 def _cfg(tmp_path, name, mode, gens=3, extra=()):
@@ -32,6 +33,10 @@ def _run(tmp_path, name, mode, gens=3, resume=False, extra=()):
 
 def _jsonl(path):
     return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+
+
+# Wall-clock minutes differ between any two runs; everything else must match.
+TIMING = tuple(TIMING_COLUMNS)
 
 
 def _csv(path, drop=()):
@@ -102,7 +107,7 @@ def test_resume_matches_uninterrupted_run(tmp_path):
     _run(tmp_path, "resumed", "mesb", gens=2)
     resumed = _run(tmp_path, "resumed", "mesb", gens=4, resume=True)
     assert _csv(straight.evaluations_csv) == _csv(resumed.evaluations_csv)
-    assert _csv(straight.metrics_csv) == _csv(resumed.metrics_csv)
+    assert _csv(straight.metrics_csv, TIMING) == _csv(resumed.metrics_csv, TIMING)
     assert _jsonl(straight.boundaries_jsonl) == _jsonl(resumed.boundaries_jsonl)
     assert straight.final_archive_csv.read_text() == resumed.final_archive_csv.read_text()
 
@@ -128,7 +133,7 @@ def test_resume_after_mid_generation_crash(tmp_path):
     # Already-finished evaluations were reused, not repeated.
     assert all(resumed.result_json(g).stat().st_mtime_ns == t for g, t in mtimes.items())
     assert _csv(straight.evaluations_csv) == _csv(resumed.evaluations_csv)
-    assert _csv(straight.metrics_csv) == _csv(resumed.metrics_csv)
+    assert _csv(straight.metrics_csv, TIMING) == _csv(resumed.metrics_csv, TIMING)
     assert _jsonl(straight.selection_log) == [
         {k: v for k, v in e.items() if k != "reused_plan"} for e in _jsonl(resumed.selection_log)]
 

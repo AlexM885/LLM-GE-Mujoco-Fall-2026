@@ -58,6 +58,7 @@ from sota.MujocoRL.mesb_logging import (EVALUATION_COLUMNS, METRIC_COLUMNS, RunP
 from sota.MujocoRL.results_io import DESCRIPTOR_KEYS, EvaluationOutcome, read_outcome  # noqa: E402
 from src.cfg import run_options  # noqa: E402
 from src.step_milestones import append_milestone, due_milestones  # noqa: E402
+from src.generation_stats import timing_columns  # noqa: E402
 
 SELECTION_MODES = ("nsga2", "mesb-shadow", "mesb")
 CHECKPOINT_FORMAT = "mesb-run-v1"
@@ -425,7 +426,9 @@ class MESBRun:
     # ---------------------------------------------------------- one generation
     def run_generation(self, generation: int) -> None:
         t0 = time.time()
+        phases = {"start": t0}  # time.time() marks for the timing columns of metrics.csv
         plan = self.load_or_make_plan(generation)
+        phases["llm_done"] = time.time()
         jobs = [
             EvalJob(gene_id=g["gene_id"], gene_file=self.variation.gene_file(g["gene_id"]),
                     generation=generation, train_seed=g["train_seed"],
@@ -436,6 +439,7 @@ class MESBRun:
         print(f"[gen {generation}] evaluating {len(jobs)} new genes "
               f"({self.cfg['workers']} workers)", flush=True)
         outcomes = self.evaluator.evaluate(jobs)
+        phases["genes_done"] = time.time()
         for g in plan.new_genes:
             self.registry[g["gene_id"]] = {"generation": generation, **g}
             self.outcomes[g["gene_id"]] = outcomes[g["gene_id"]]
@@ -473,8 +477,10 @@ class MESBRun:
             offspring = list(dict.fromkeys(plan.slots + plan.elites))
             self.population = offspring
         self._update_hof()
-        self._log_generation(generation, plan, adds, time.time() - t0)
+        phases["vlm_start"] = time.time()
         self._vlm_step(generation)
+        phases["vlm_done"] = phases["end"] = time.time()
+        self._log_generation(generation, plan, adds, time.time() - t0, phases)
         self.save_checkpoint(generation)
 
     def _vlm_step(self, generation: int) -> None:
@@ -512,7 +518,7 @@ class MESBRun:
 
     # ---------------------------------------------------------- logging
     def _log_generation(self, generation: int, plan: GenerationPlan, adds: dict,
-                        seconds: float) -> None:
+                        seconds: float, phases: dict | None = None) -> None:
         rows = []
         for g in plan.new_genes:
             o = self.outcomes[g["gene_id"]]
@@ -551,6 +557,9 @@ class MESBRun:
                          + [boundary_record(self.archive, generation, "generation_end")])
             self.remap_events_written = len(self.archive.remap_events)
             write_snapshot(self.paths, self.archive, generation)
+        timings = getattr(self.evaluator, "timings", {})
+        metrics.update(timing_columns(phases or {}, [timings.get(g["gene_id"], {}) for g in plan.new_genes],
+                                      (phases or {}).get("start", 0)))
         append_csv(self.paths.metrics_csv, METRIC_COLUMNS, [metrics])
         self._record_milestones(generation)
 

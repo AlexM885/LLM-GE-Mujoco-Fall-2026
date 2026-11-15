@@ -88,8 +88,7 @@ HOOKS = [
      '        mesb_matched.check_resume(population_data.get("MATCHED_OPTIONS"))' + TAG + "\n"
      '        MESB_STATE.load(population_data.get("MESB_STATE"))' + TAG + "\n"),
     ("H6 stop after generation 0",
-     "    check_and_update_fitness(population)\n    if USE_MAP_ELITES:\n"
-     '        box_print("SEEDING MAP-ELITES ARCHIVE"',
+     "    check_and_update_fitness(population)\n    gen_phases[\"genes_done\"] = time.time()\n",
      "    check_and_update_fitness(population)\n"
      "    if mesb_matched.STOP_AFTER_GEN0:" + TAG + "\n"
      "        if population_data:\n"
@@ -97,8 +96,7 @@ HOOKS = [
      "        save_checkpoint(0, folder_name=args.checkpoints, global_path=args.global_path)\n"
      "        print('[matched] generation 0 evaluated and saved; exiting', flush=True)\n"
      "        raise SystemExit(0)\n"
-     "    if USE_MAP_ELITES:\n"
-     '        box_print("SEEDING MAP-ELITES ARCHIVE"'),
+     "    gen_phases[\"genes_done\"] = time.time()\n"),
     ("H7 options",
      "    args = parser.parse_args()\n",
      "    args = parser.parse_args()\n"

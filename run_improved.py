@@ -21,7 +21,7 @@ from functools import partial
 from src.utils.print_utils import print_population, print_scores, box_print, print_job_info
 from src.llm_utils import split_file, retrieve_base_code
 from src.step_milestones import append_milestone, due_milestones, milestone_label
-from src.generation_stats import generation_row, append_row as append_generation_stats
+from src.generation_stats import generation_row, timing_columns, append_row as append_generation_stats
 from src.eval_jobs import (packed_runline, packed_gene_state, gene_output_path, pending_job_ids,
                            update_eval_clock, job_shared_with_running_gene)
 from src.cfg.constants import *
@@ -788,10 +788,12 @@ def check4results(gene_id):
         GLOBAL_DATA[gene_id]['status'] = 'completed'
         GLOBAL_DATA[gene_id]['fitness'] = fitness
         GLOBAL_DATA[gene_id]['metrics'] = metrics
+        GLOBAL_DATA[gene_id]['finish_time'] = time.time()  # generation_stats.csv train time
         # print(f'Model from Gene: {gene_id} Evaluated')
     elif job_done is False:
         GLOBAL_DATA[gene_id]['status'] = 'completed'
         GLOBAL_DATA[gene_id]['fitness'] = INVALID_FITNESS_MAX
+        GLOBAL_DATA[gene_id]['finish_time'] = time.time()
         # print(f'Model from Gene: {gene_id} Failed to Run')
     else:
         # print('Job Has Not Finished Running Yet...', flush=True)
@@ -1833,10 +1835,13 @@ def update_archive(population):
           f"({coverage:.1f}% coverage), QD-score(raw) {qd_score:.2f}")
     return updated_genes
 
-def write_generation_stats(gen, folder_name, offspring, updated_genes):
-    """Append this generation's health (trained / failed / duplicates / archive updates) to
+def write_generation_stats(gen, folder_name, offspring, updated_genes, phases=None):
+    """Append this generation's health (trained / failed / duplicates / archive updates) and
+    where its time went (phases: time.time() marks, see timing_columns) to
     <checkpoints>/generation_stats.csv (src/generation_stats.py)."""
     try:
+        phases = dict(phases or {})
+        phases.setdefault("end", time.time())
         entries = [GLOBAL_DATA.get(ind[0]) or GLOBAL_DATA_HIST.get(ind[0]) or {} for ind in offspring]
         if USE_MAP_ELITES:
             qualities = [get_quality(ind) for ind in archive_members()]
@@ -1850,10 +1855,14 @@ def write_generation_stats(gen, folder_name, offspring, updated_genes):
         row = generation_row(gen, entries, qualities, cells, updates,
                              count_successful_evals(GLOBAL_DATA, GLOBAL_DATA_HIST), INVALID_FITNESS_MAX,
                              MAP_ELITES_OBJECTIVE, FAILED_EVAL_SENTINEL)
+        row.update(timing_columns(phases, entries, phases.get("start", 0)))
         path = append_generation_stats(folder_name, row)
         print(f"\t‣ Generation {gen}: {row['trained_ok']} trained, {row['duplicates']} duplicates, "
               f"{row['failed']} failed, {row['timeouts']} timeouts, {row['archive_updates']} archive updates "
               f"({path})", flush=True)
+        print(f"\t‣ Generation {gen} minutes: LLM {row['llm_min']}, genes {row['genes_min']} "
+              f"(queue median {row['gene_queue_median_min']}, train median {row['gene_train_median_min']}), "
+              f"VLM {row['vlm_min']}, total {row['generation_min']}", flush=True)
     except Exception as e:  # statistics must never stop a run
         print(f"\t☠ Could not write generation stats: {e!r}", flush=True)
 
@@ -1997,6 +2006,7 @@ if __name__ == "__main__":
         print("Error in Island Generation: No LLM specified. Exiting script")
         exit(1)
 
+    gen_phases = {}  # time.time() marks of the current generation, for generation_stats.csv
     population_data, start_gen, global_data = load_checkpoint(folder_name=args.checkpoints, global_path=args.global_path)
     if population_data:
         box_print("CHECKPOINT LOADED")
@@ -2022,10 +2032,12 @@ if __name__ == "__main__":
     else:
         # Create an initial population
         start_gen = 1
+        gen_phases["start"] = time.time()
         box_print("CREATING POPULATION FROM SEED CODE")
         population = toolbox.population(n=start_population_size, llm_model=llm_model)
         box_print("Batch Checking Created Genes", print_bbox_len=60, new_line_end=False)
         delayed_creation_check(population)
+        gen_phases["llm_done"] = time.time()
         hof = tools.ParetoFront()
 
     # Evaluate the entire population
@@ -2033,13 +2045,16 @@ if __name__ == "__main__":
         ind.fitness.values = PLACEHOLDER_FITNESS
         
     check_and_update_fitness(population)
+    gen_phases["genes_done"] = time.time()
     seeded_genes = set()
     if USE_MAP_ELITES:
         box_print("SEEDING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
         seeded_genes = update_archive(population)
     if not population_data:
-        write_generation_stats(0, args.checkpoints, population, seeded_genes)
+        gen_phases["vlm_start"] = time.time()
         vlm_step(0, args.checkpoints, archive_members() if USE_MAP_ELITES else population)
+        gen_phases["vlm_done"] = time.time()
+        write_generation_stats(0, args.checkpoints, population, seeded_genes, gen_phases)
         # Checkpoint the evaluated initial population, like every later generation:
         # a controller that times out during generation 1 then resumes there instead
         # of redoing generation 0 (walker_xqc_vlm_emitters lost 2 x 18 h jobs that way).
@@ -2069,6 +2084,7 @@ if __name__ == "__main__":
             archived = archive_members()
             if archived:
                 population = archived
+        gen_phases = {"start": time.time()}
         TOP_N_GENES = tools.selSPEA2(population, NUM_EOT_ELITES) if population else []
         box_print(f"STARTING GENERATION: {gen}", new_line_end=False)
         print_population(population, GLOBAL_DATA)
@@ -2172,6 +2188,7 @@ if __name__ == "__main__":
                 
         box_print("Batch Checking Mated Genes", print_bbox_len=60, new_line_end=False)       
         offspring = delayed_mate_check(offspring)
+        gen_phases["crossover_done"] = time.time()
         print_population(offspring, GLOBAL_DATA)
         
         # Apply mutation on the offspring
@@ -2186,6 +2203,7 @@ if __name__ == "__main__":
                 
         box_print("Batch Checking Mutated Genes", print_bbox_len=60, new_line_end=False)
         offspring = delayed_mutate_check(offspring)
+        gen_phases["mutation_done"] = time.time()
         print_population(offspring, GLOBAL_DATA)
         
         # Add elites back to offspring. Usually before the mute and cross but in this case we save them
@@ -2213,6 +2231,7 @@ if __name__ == "__main__":
 
         GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
         check_and_update_fitness(offspring)
+        gen_phases["genes_done"] = time.time()
         GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
         updated_genes = set()
         if USE_MAP_ELITES:
@@ -2231,8 +2250,10 @@ if __name__ == "__main__":
         hof.update(population)
         save_checkpoint(gen, folder_name=args.checkpoints, global_path=args.global_path)
         record_milestones(gen, args.checkpoints)
-        write_generation_stats(gen, args.checkpoints, offspring, updated_genes)
+        gen_phases["vlm_start"] = time.time()
         vlm_step(gen, args.checkpoints, archive_members() if USE_MAP_ELITES else population)
+        gen_phases["vlm_done"] = time.time()
+        write_generation_stats(gen, args.checkpoints, offspring, updated_genes, gen_phases)
         if MOME:
             write_archive_csv(gen, args.checkpoints)
         LINKED_GENES = {}

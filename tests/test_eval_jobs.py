@@ -122,7 +122,8 @@ def test_job_shared_with_running_gene():
 
 # --- src/generation_stats.py ---
 
-from src.generation_stats import COLUMNS, append_row, classify, generation_row  # noqa: E402
+from src.generation_stats import (COLUMNS, TIMING_COLUMNS, append_row, classify, generation_row,  # noqa: E402
+                                  timing_columns)
 
 INVALID = (float("-inf"), float("inf"))
 
@@ -151,3 +152,75 @@ def test_generation_row_and_csv(tmp_path):
     append_row(str(tmp_path), {**row, "generation": 4})
     lines = open(path).read().splitlines()
     assert lines[0].split(",") == COLUMNS and len(lines) == 3
+
+
+def test_timing_columns():
+    phases = {"start": 0, "crossover_done": 120, "mutation_done": 300, "genes_done": 3900,
+              "vlm_start": 3900, "vlm_done": 4500, "end": 4560}
+    genes = [
+        {"submit_time": 300, "eval_start_time": 900, "finish_time": 2700},    # 10 min queue, 30 train
+        {"submit_time": 300, "eval_start_time": 2100, "finish_time": 3900},   # 30 min queue, 30 train
+        {"submit_time": 300, "eval_start_time": 300, "finish_time": 600},     # 0 queue, 5 train
+        {"submit_time": 300, "eval_start_time": 1500},                        # timed out: queue only
+        {"submit_time": 310, "eval_start_time": 310, "finish_time": 310, "duplicate_of": "x"},
+        {"submit_time": -500, "eval_start_time": -400, "finish_time": -100},  # parent from an older gen
+        {},                                                                   # never submitted
+    ]
+    t = timing_columns(phases, genes, since=0)
+    assert set(t) == set(TIMING_COLUMNS)
+    assert (t["llm_min"], t["crossover_min"], t["mutation_min"]) == (5.0, 2.0, 3.0)
+    assert t["genes_min"] == 60.0 and t["vlm_min"] == 10.0 and t["generation_min"] == 76.0
+    assert (t["gene_queue_median_min"], t["gene_queue_max_min"]) == (15.0, 30.0)
+    assert (t["gene_train_median_min"], t["gene_train_max_min"]) == (30.0, 30.0)
+
+
+def test_timing_columns_generation0_and_missing_marks():
+    t = timing_columns({"start": 0, "llm_done": 600, "end": 1200}, [], since=0)
+    assert t["llm_min"] == 10.0 and t["crossover_min"] == "" and t["mutation_min"] == ""
+    assert t["genes_min"] == "" and t["gene_train_median_min"] == "" and t["vlm_min"] == ""
+    assert t["generation_min"] == 20.0
+    assert all(v == "" for v in timing_columns({}, [], since=0).values())
+
+
+def test_generation_csv_has_timing_columns(tmp_path):
+    row = generation_row(0, [], [], 0, 0, 0, INVALID, "mean_reward", -999999.0, now=0)
+    path = append_row(str(tmp_path), row)   # no timing marks: columns present but blank
+    header, line = open(path).read().splitlines()
+    assert header.split(",") == COLUMNS and header.endswith("generation_min")
+    assert line.count(",") == len(COLUMNS) - 1
+
+
+def _dry_run(tier, repeat="1"):
+    repo = Path(__file__).resolve().parents[1]
+    out = subprocess.run(["bash", str(repo / "scripts" / "tiered_run.sh"), tier, repeat, "--dry-run"],
+                         capture_output=True, text=True, cwd=repo,
+                         env={k: v for k, v in os.environ.items()
+                              if not k.startswith(("LLMGE_", "XQC_", "MUJOCO_"))})
+    assert out.returncode == 0, out.stderr
+    return dict(line.split("=", 1) for line in out.stdout.splitlines()
+                if "=" in line and " " not in line.split("=", 1)[0])
+
+
+def test_tiered_run_fixed_settings_same_for_every_tier():
+    settings = {tier: _dry_run(tier) for tier in ("control", "emitters", "sliding")}
+    fixed = ["XQC_EVAL_TIMESTEPS", "XQC_EVAL_SEEDS", "LLMGE_POP_SIZE", "MUJOCO_TOTAL_TIMESTEPS",
+             "LLMGE_XQC_EVAL_INTERVAL", "LLMGE_GENES_PER_JOB", "LLMGE_GENE_TIME", "GENE_SBATCH_FLAGS",
+             "LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS", "EXTRA_ARGS", "LLMGE_TRAIN_SEED"]
+    for key in fixed:
+        assert len({s[key] for s in settings.values()}) == 1, key
+    s = settings["control"]
+    assert s["XQC_EVAL_TIMESTEPS"] == "300000" and s["XQC_EVAL_SEEDS"] == "3"
+    assert s["LLMGE_XQC_EVAL_INTERVAL"] == "25000" and s["LLMGE_GENES_PER_JOB"] == "2"
+    # the sliding tier's gene jobs get the same wall time and bad-node list as the others
+    assert s["GENE_SBATCH_FLAGS"].startswith(f"-t {s['LLMGE_GENE_TIME']} --exclude=")
+    assert "atl1-1-03-010-25-0" in s["GENE_SBATCH_FLAGS"]
+    assert (settings["control"]["USE_LLM_EMITTERS"], settings["emitters"]["USE_LLM_EMITTERS"]) == ("0", "1")
+    assert settings["sliding"]["LLMGE_SLIDING_BOUNDARIES"] == "1"
+
+
+def test_tiered_run_repeats_differ_only_in_seed_and_name():
+    r1, r2 = _dry_run("control", "1"), _dry_run("control", "2")
+    assert (r1["LLMGE_TRAIN_SEED"], r2["LLMGE_TRAIN_SEED"]) == ("0", "1000")
+    assert r1["SEED"] == r1["LLMGE_TRAIN_SEED"]
+    differ = {k for k in r1 if r1.get(k) != r2.get(k)} - {"date", "LLMGE_PORT", "LLMGE_HOSTNAME_FILE"}
+    assert differ <= {"LLMGE_TRAIN_SEED", "SEED", "run", "repeat"}, differ

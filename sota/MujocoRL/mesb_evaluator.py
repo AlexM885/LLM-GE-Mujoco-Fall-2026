@@ -23,12 +23,14 @@ tests of the evolution/archive plumbing only and has no scientific meaning.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import math
 import os
 import shlex
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +81,9 @@ class EvalSettings:
 class _BaseEvaluator:
     def __init__(self, settings: EvalSettings) -> None:
         self.settings = settings
+        #: gene_id -> {"submit_time", "eval_start_time", "finish_time"} (epoch seconds) of the
+        #: genes evaluated so far; the driver turns them into queue / train times per generation.
+        self.timings: dict[str, dict[str, float]] = {}
 
     def _run_one(self, job: EvalJob) -> None:  # pragma: no cover - abstract
         raise NotImplementedError
@@ -184,6 +189,7 @@ class SlurmEvaluator(_BaseEvaluator):
         job.log_file.parent.mkdir(parents=True, exist_ok=True)
         cmd = self.command(job)
         reason, job_id = None, None
+        submitted = time.time()
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
@@ -204,8 +210,22 @@ class SlurmEvaluator(_BaseEvaluator):
                               f"without a result file{': ' + err.strip()[-300:] if err.strip() else ''}")
         except OSError as exc:
             reason = f"could not run sbatch: {exc}"
+        if job_id and reason is None:
+            self.timings[job.gene_id] = {"submit_time": submitted, "finish_time": time.time(),
+                                         **slurm_start_time(job_id)}
         if reason is not None:
             _write_failure(job, reason, "slurm")
+
+
+def slurm_start_time(job_id: str, run=subprocess.run) -> dict[str, float]:
+    """{"eval_start_time": <epoch>} of a finished Slurm job (sacct), or {} if unknown."""
+    try:
+        out = run(["sacct", "-j", str(job_id), "-X", "-n", "-P", "-o", "Start"],
+                  capture_output=True, text=True, timeout=60).stdout
+        start = out.strip().splitlines()[0].strip()
+        return {"eval_start_time": datetime.datetime.fromisoformat(start).timestamp()}
+    except Exception:  # timing is informational only
+        return {}
 
 
 def _first_job_id(text: str | None) -> str | None:

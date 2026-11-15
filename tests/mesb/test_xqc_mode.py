@@ -2,6 +2,7 @@
 adapter, Slurm evaluator and a mock end-to-end run. No JAX, GPU or LLM."""
 
 import ast
+import datetime
 import json
 import os
 import stat
@@ -14,7 +15,8 @@ import pytest
 
 import run_mesb
 from sota.MujocoRL import train_gene_xqc as adapter
-from sota.MujocoRL.mesb_evaluator import EvalJob, EvalSettings, SlurmEvaluator, trainer_args
+from sota.MujocoRL.mesb_evaluator import (EvalJob, EvalSettings, SlurmEvaluator, slurm_start_time,
+                                          trainer_args)
 from sota.MujocoRL.mesb_logging import RunPaths
 from sota.MujocoRL.results_io import read_outcome, validate_payload
 from src.cfg import constants_mesb as C
@@ -218,6 +220,8 @@ def fake_slurm(tmp_path, monkeypatch):
         sys.exit(rc)
         """))
     _exe(bin_dir / "scancel", f"#!/bin/sh\necho \"$@\" >> {tmp_path}/scancelled\n")
+    # sacct: when the (fake) job started, for the evaluator's queue / train times
+    _exe(bin_dir / "sacct", "#!/bin/sh\necho 2026-11-14T20:00:00\n")
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return tmp_path
 
@@ -264,9 +268,28 @@ def test_slurm_evaluator_runs_jobs(fake_slurm):
         open(out, "w").write({payload!r}.replace("GENE", gid))
         print("trained", gid)
     """)
-    outcomes = SlurmEvaluator(_settings(script)).evaluate(_jobs(tmp, 4))
+    ev = SlurmEvaluator(_settings(script))
+    outcomes = ev.evaluate(_jobs(tmp, 4))
     assert all(o.ok for o in outcomes.values()) and len(outcomes) == 4
     assert "trained g2" in (tmp / "logs" / "g2.log").read_text()
+    # each gene's submit / start (sacct) / finish times are kept for metrics.csv
+    assert set(ev.timings) == set(outcomes)
+    t = ev.timings["g2"]
+    assert t["submit_time"] <= t["finish_time"]
+    assert t["eval_start_time"] == datetime.datetime(2026, 11, 14, 20).timestamp()
+
+
+def test_slurm_start_time_unknown_or_unavailable():
+    def fake(out):
+        return lambda *a, **k: Namespace(stdout=out)
+    assert slurm_start_time("1", run=fake("2026-11-14T20:00:00\n")) == {
+        "eval_start_time": datetime.datetime(2026, 11, 14, 20).timestamp()}
+    assert slurm_start_time("1", run=fake("Unknown\n")) == {}
+    assert slurm_start_time("1", run=fake("")) == {}
+
+    def missing(*a, **k):
+        raise FileNotFoundError("sacct")
+    assert slurm_start_time("1", run=missing) == {}
 
 
 def test_slurm_evaluator_timeout_and_missing_result(fake_slurm):
@@ -300,6 +323,11 @@ def test_driver_xqc_defaults_and_mock_run(tmp_path):
     genes = list(paths.genes.glob("network_*.py"))
     assert genes and all('ALGO = "xqc"' in g.read_text() for g in genes)
     assert all(validate_xqc_gene(g, C.XQC_GENE_VALIDATOR)[0] for g in genes)
+    # metrics.csv says where each generation's time went (mock evaluator: no queue / train times)
+    import csv
+    rows = list(csv.DictReader(open(paths.metrics_csv)))
+    assert len(rows) == 3 and all(float(r["generation_min"]) >= 0 for r in rows)  # generations 0-2
+    assert all(r["llm_min"] != "" and r["genes_min"] == "" for r in rows)
 
 
 def test_driver_rejects_bad_combinations(tmp_path):
@@ -311,16 +339,21 @@ def test_driver_rejects_bad_combinations(tmp_path):
 
 
 def test_resume_of_pre_xqc_run_assumes_ppo(tmp_path):
-    cfg = _cfg(tmp_path, "old")
-    run_mesb.MESBRun(cfg).run(resume=False)
+    # A config.json from before --algo existed (a PPO run) has no algo / eval_num_seeds keys:
+    # the resume check must read them as PPO with one seed. The default learner is now TD3,
+    # so only an explicit --algo ppo matches.
+    run_mesb.MESBRun(_cfg(tmp_path, "old")).run(resume=False)
     paths = RunPaths(tmp_path / "old")
     stored = json.loads(paths.config.read_text())
     for key in ("algo", "eval_num_seeds"):
         stored.pop(key)
     paths.config.write_text(json.dumps(stored))
-    run_mesb.MESBRun(_cfg(tmp_path, "old")).run(resume=True)       # no mismatch error
-    with pytest.raises(run_mesb.CheckpointMismatchError):
-        run_mesb.MESBRun(_cfg(tmp_path, "old", ["--algo", "xqc"])).run(resume=True)
+    ppo = _cfg(tmp_path, "old", ["--algo", "ppo"])
+    assert ppo["eval_num_seeds"] == 1 and ppo["seed_network"] is None
+    run_mesb.MESBRun(ppo)._check_resume_config()                   # no mismatch error
+    for algo in (["--algo", "xqc"], []):                           # xqc, and the td3 default
+        with pytest.raises(run_mesb.CheckpointMismatchError):
+            run_mesb.MESBRun(_cfg(tmp_path, "old", algo))._check_resume_config()
 
 
 def test_seed_network_override(tmp_path):
