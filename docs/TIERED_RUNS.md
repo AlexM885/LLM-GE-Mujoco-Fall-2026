@@ -21,7 +21,7 @@ All of these are set inside `scripts/tiered_run.sh`. You never type them yoursel
 | Final evaluation | 10 episodes | midterm config |
 | Archive | 32×32 MAP-Elites (left/right foot contact) | midterm config |
 | Budget | 10 generations' worth of steps (288M), compared at equal steps | fair compute for every tier |
-| Learning curve | every 50k steps | lets us redo the Kendall tau check |
+| Learning curve | every 25k steps (same as the midterm runs) | lets us redo the Kendall tau check |
 | Speed-ups | GPU replay buffer, compile cache, duplicate reuse, queue-aware timeouts, gen-0 checkpoint | change speed, not results |
 | Training seeds per repeat | repeat 1: 0–2, repeat 2: 1000–1002, repeat 3: 2000–2002 | repeats differ in training luck too |
 
