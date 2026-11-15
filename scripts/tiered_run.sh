@@ -44,7 +44,7 @@ export LLMGE_GENE_TIME=6:00:00                 # gene job wall time; tighten fro
 export LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS=$(( 6 * 3600 + 1800 ))  # > gene wall time; counts from job start
 export LLMGE_EVAL_MAX_QUEUE_SECONDS=$(( 48 * 3600 ))
 export LLMGE_REUSE_DUPLICATES=1                # identical genes reuse a result instead of retraining
-BAD_NODES="atl1-1-03-014-16-0,atl1-1-03-011-3-0"  # failed CUDA init in October
+BAD_NODES="atl1-1-03-014-16-0,atl1-1-03-011-3-0,atl1-1-03-010-25-0"  # fail JAX CUDA init (Oct; 010-25-0 on Nov 14)
 # ---------------------------------------------------------------------------
 
 # Tier: the only thing that differs between runs.
