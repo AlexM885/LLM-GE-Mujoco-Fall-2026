@@ -25,7 +25,10 @@ echo "Using UV cache: $UV_CACHE_DIR"
 
 export SERVER_HOSTNAME=$(hostname)
 
-HOSTNAME_FILE=$(pwd)"/hostname.log"
+# LLMGE_HOSTNAME_FILE (same variable the controller reads, src/cfg/constants.py) lets
+# other runs share this server: put it where they can read it, e.g. team storage.
+HOSTNAME_FILE="${LLMGE_HOSTNAME_FILE:-$(pwd)/hostname.log}"
+mkdir -p "$(dirname "$HOSTNAME_FILE")"
 
 # Write hostname to file so tests can find the server
 echo "$SERVER_HOSTNAME" > "$HOSTNAME_FILE"

@@ -9,6 +9,9 @@ num_seeds: 10
 start_training: 5_000
 max_steps: 1_000_000
 replay_buffer_size: 1_000_000
+# true = keep the replay buffer in GPU memory and sample batches there (same
+# batches; no per-step numpy gather and host-to-GPU copy). LLM-GE genes set it.
+replay_buffer_on_device: false
 
 batch_size: 256
 updates_per_step: 2
@@ -17,6 +20,8 @@ log_interval: 10_000
 log_interval_condition_number:
 eval_interval: 50_000
 eval_episodes: 10
+final_eval: true              # false = no eval at max_steps (LLM-GE genes: descriptors.json evaluates instead)
+jax_cache_dir: ""             # directory for JAX's persistent compilation cache ("" = off)
 eval_video: false
 eval_video_fps: 30
 eval_video_frameskip: 1

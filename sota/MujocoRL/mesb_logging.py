@@ -41,6 +41,9 @@ METRIC_COLUMNS = [
     "occupied_cells", "total_cells", "coverage", "raw_qd_score", "shifted_qd_score",
     "mean_elite_reward", "best_reward", "best_gene_id", "number_of_remaps", "archive_total_seen",
     "population_size", "population_best_reward",
+    # Where the generation's time went (minutes; src/generation_stats.py timing_columns).
+    "llm_min", "crossover_min", "mutation_min", "genes_min", "gene_queue_median_min",
+    "gene_queue_max_min", "gene_train_median_min", "gene_train_max_min", "vlm_min", "generation_min",
 ]
 
 ARCHIVE_COLUMNS = [

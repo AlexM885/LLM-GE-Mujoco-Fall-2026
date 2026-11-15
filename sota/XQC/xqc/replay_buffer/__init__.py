@@ -1,1 +1,2 @@
 from xqc.replay_buffer.parallel_replay_buffer import Batch, ParallelReplayBuffer
+from xqc.replay_buffer.device_replay_buffer import DeviceReplayBuffer

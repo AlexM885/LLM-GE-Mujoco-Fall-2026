@@ -88,6 +88,9 @@ def load_buffer(path, rb):
         if int(d["capacity"]) != rb.capacity:
             raise ValueError(f"Replay buffer capacity changed: {int(d['capacity'])} -> {rb.capacity}")
         n = int(d["size"])
+        if hasattr(rb, "load_arrays"):  # DeviceReplayBuffer: immutable JAX arrays
+            rb.load_arrays({f: d[f] for f in BUFFER_FIELDS}, n, int(d["insert_index"]))
+            return
         for f in BUFFER_FIELDS:
             getattr(rb, f)[:, :n] = d[f]
         rb.size = n
