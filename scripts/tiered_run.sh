@@ -42,10 +42,13 @@ export LLMGE_XQC_EVAL_INTERVAL=25000           # learning curve (eval.csv) every
 # Gene jobs. PACE caps each user at 32 GPU-hours of *requested* time over running jobs
 # (the LLM server holds 16), so the wall time we ask for decides how many genes run at once.
 # Timing test (Nov 14, H200): the seed gene trains 300k x 3 seeds in ~24 min alone, and two
-# packed on one GPU take ~27 min together. 3 h leaves room for slower GPUs and big evolved genes.
+# packed on one GPU take ~27 min together. Smoke test (Nov 15): on any GPU, Slurm gave every gene
+# job a V100 / RTX 6000 / A40, where a packed pair took 1.1-3 h and 4 of 23 hit a 3 h limit.
+# So gene jobs ask for H100 / H200 only, with a 2 h wall time.
 export LLMGE_GENES_PER_JOB=2                   # two genes share one GPU job (~1.75x genes per GPU-hour)
-export LLMGE_GENE_TIME=3:00:00                 # gene job wall time
-export LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS=$(( 3 * 3600 + 1800 ))  # > gene wall time; counts from job start
+export LLMGE_GENE_TIME=2:00:00                 # gene job wall time
+GENE_GPUS="H100|H200"                          # gene GPU types (Slurm features)
+export LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS=$(( 2 * 3600 + 1800 ))  # > gene wall time; counts from job start
 export LLMGE_EVAL_MAX_QUEUE_SECONDS=$(( 48 * 3600 ))
 export LLMGE_REUSE_DUPLICATES=1                # identical genes reuse a result instead of retraining
 BAD_NODES="atl1-1-03-014-16-0,atl1-1-03-011-3-0,atl1-1-03-010-25-0"  # fail JAX CUDA init (Oct; 010-25-0 on Nov 14)
@@ -66,7 +69,7 @@ export LLMGE_TRAIN_SEED=$(( (REPEAT - 1) * 1000 ))
 export SEED="$LLMGE_TRAIN_SEED"                # the same seed for the sliding-boundaries driver
 export LLMGE_EXCLUDE_NODES="$BAD_NODES"
 # Same wall time for the sliding tier's gene jobs (its job script defaults to 1:30:00).
-export GENE_SBATCH_FLAGS="-t $LLMGE_GENE_TIME --exclude=$BAD_NODES"
+export GENE_SBATCH_FLAGS="-t $LLMGE_GENE_TIME -C $GENE_GPUS --exclude=$BAD_NODES"
 # Sliding tier (run_mesb.py): its gene timeout covers queue + training, so give it the same
 # queue limit plus gene time as the other tiers, and keep a whole generation in flight.
 export EXTRA_ARGS="--eval-timeout $(( LLMGE_EVAL_MAX_QUEUE_SECONDS + LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS ))"

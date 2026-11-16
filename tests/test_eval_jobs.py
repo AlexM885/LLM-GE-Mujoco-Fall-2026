@@ -218,7 +218,7 @@ def test_tiered_run_fixed_settings_same_for_every_tier():
     assert s["XQC_EVAL_TIMESTEPS"] == "300000" and s["XQC_EVAL_SEEDS"] == "3"
     assert s["LLMGE_XQC_EVAL_INTERVAL"] == "25000" and s["LLMGE_GENES_PER_JOB"] == "2"
     # the sliding tier's gene jobs get the same wall time and bad-node list as the others
-    assert s["GENE_SBATCH_FLAGS"].startswith(f"-t {s['LLMGE_GENE_TIME']} --exclude=")
+    assert s["GENE_SBATCH_FLAGS"].startswith(f"-t {s['LLMGE_GENE_TIME']} -C H100|H200 --exclude=")
     assert "atl1-1-03-010-25-0" in s["GENE_SBATCH_FLAGS"]
     assert (settings["control"]["USE_LLM_EMITTERS"], settings["emitters"]["USE_LLM_EMITTERS"]) == ("0", "1")
     assert settings["sliding"]["LLMGE_SLIDING_BOUNDARIES"] == "1"
