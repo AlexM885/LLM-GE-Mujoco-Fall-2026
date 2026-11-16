@@ -137,6 +137,11 @@ def test_classify_gene_outcomes():
     assert classify({"status": "completed", "fitness": INVALID}, INVALID, "mean_reward", -999999.0) == "failed"
     sentinel = {"status": "completed", "metrics": {"mean_reward": -999999.0}}
     assert classify(sentinel, INVALID, "mean_reward", -999999.0) == "failed"
+    # a parent copy left by a failed crossover / mutation: its record is older than the generation
+    parent = {**ok, "start_time": 100.0}
+    assert classify(parent, INVALID, "mean_reward", -999999.0, since=500.0) == "unchanged"
+    assert classify({**ok, "start_time": 600.0}, INVALID, "mean_reward", -999999.0, since=500.0) == "trained_ok"
+    assert classify(parent, INVALID, "mean_reward", -999999.0) == "trained_ok"   # generation 0: no `since`
 
 
 def test_generation_row_and_csv(tmp_path):
@@ -146,6 +151,7 @@ def test_generation_row_and_csv(tmp_path):
                {"status": "completed", "fitness": INVALID}]
     row = generation_row(3, entries, [100.0, 500.0, 300.0], 3, 2, 40, INVALID, "mean_reward", -999999.0, now=0)
     assert (row["offspring"], row["trained_ok"], row["duplicates"], row["timeouts"], row["failed"]) == (4, 1, 1, 1, 1)
+    assert row["unchanged"] == 0
     assert (row["archive_updates"], row["archive_cells"], row["best"], row["median_archive"], row["qd_score"]) \
         == (2, 3, 500.0, 300.0, 900.0)
     path = append_row(str(tmp_path), row)
