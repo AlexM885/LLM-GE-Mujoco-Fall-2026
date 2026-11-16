@@ -7,6 +7,8 @@ launch it with EVAL_RUNLINE:
 
 1. Loads llmge/models/network_<gene_id>.py, checks ALGO == "xqc", and validates every
    key of get_architecture_kwargs() | get_xqc_kwargs() against ALLOWED (type + range).
+   With LLMGE_XQC_COST_CAP=<k> set, a gene whose training cost is over k times the
+   seed's is shrunk until it fits (see relative_cost and fit_cost_cap).
 2. Runs train_xqc.py with those keys as Hydra overrides (num_seeds trained batched,
    no checkpoints, final_descriptors=true, save_actor=true: the trained actors are
    kept in the run dir as actor.pkl, ~1 MB, so render_actor.py can film any gene;
@@ -87,7 +89,8 @@ def validate(key, value, spec):
     return repr(float(value)) if kind is float else str(value)
 
 
-def gene_overrides(path):
+def gene_values(path):
+    """The gene's settings ({**get_architecture_kwargs(), **get_xqc_kwargs()}), checked."""
     spec = importlib.util.spec_from_file_location("gene", path)
     gene = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gene)
@@ -96,14 +99,122 @@ def gene_overrides(path):
     arch, hyper = gene.get_architecture_kwargs(), gene.get_xqc_kwargs()
     if not isinstance(arch, dict) or not isinstance(hyper, dict):
         raise ValueError("get_architecture_kwargs() and get_xqc_kwargs() must return dicts")
+    values = {**arch, **hyper}
+    for key, value in values.items():
+        if key not in AGENT_KEYS and key not in TOP_KEYS:
+            raise ValueError(f"unknown key {key!r}")
+        validate(key, value, AGENT_KEYS.get(key) or TOP_KEYS[key])
+    return values
+
+
+# ---------------------------------------------------------------------------
+# Training-cost cap. Packed genes on PACE take 5-8x the seed's time when the LLM
+# raises batch size, updates per step and widths together (500k run, Nov 15), and
+# a generation waits for its slowest gene.
+# ---------------------------------------------------------------------------
+#: XQC defaults for keys a gene leaves out (conf/agent/base_agent.yaml, conf/config.yaml).
+COST_DEFAULTS = {"hidden_dims_critic": [512] * 4, "hidden_dims_actor": [256] * 4,
+                 "batch_size": 256, "updates_per_step": 2}
+#: Walker2d / HalfCheetah sizes and the categorical critic's 101 bins (xqc_learner.py).
+#: Input and output layers are a small share of the cost, so other robots are close enough.
+OBS_DIM, ACT_DIM, CRITIC_BINS = 17, 6, 101
+SEED_GENE = os.path.join(LLMGE_DIR, "network.py")
+
+
+def cost_cap():
+    """LLMGE_XQC_COST_CAP as a number; 0 (unset) = no cap."""
+    return float(os.environ.get("LLMGE_XQC_COST_CAP") or 0)
+
+
+def _mlp_weights(in_dim, hidden, out_dim):
+    dims = [in_dim, *hidden, out_dim]
+    return sum(a * b for a, b in zip(dims, dims[1:]))
+
+
+def _cost_parts(values):
+    """(updates per env step, batch_size x weights per update) of a gene's settings."""
+    v = {**COST_DEFAULTS, **values}
+    weights = (2 * _mlp_weights(OBS_DIM + ACT_DIM, v["hidden_dims_critic"], CRITIC_BINS)
+               + _mlp_weights(OBS_DIM, v["hidden_dims_actor"], 2 * ACT_DIM))
+    return v["updates_per_step"], v["batch_size"] * weights
+
+
+def relative_cost(values, seed):
+    """Training time per env step of a gene, relative to the seed gene (seed = 1.0).
+
+    Each update costs a roughly fixed overhead (GPU launches, Python) until the
+    network is bigger than the seed's, after which batch_size x weights takes
+    over. So: (updates_per_step ratio) x max(1, batch_size x weights ratio).
+    """
+    updates, work = _cost_parts(values)
+    seed_updates, seed_work = _cost_parts(seed)
+    return updates / seed_updates * max(1.0, work / seed_work)
+
+
+def fit_cost_cap(values, seed, cap):
+    """Shrink a gene until relative_cost(values, seed) <= cap.
+
+    Each step cuts whichever of updates_per_step, batch_size and network size is
+    furthest above the seed's: updates_per_step - 1, batch_size / 2, or every
+    hidden width x 0.85 (floors 1, 16 and 16). Returns (new values, {key: (old, new)}).
+    """
+    v = dict(values)
+    seed_v = {**COST_DEFAULTS, **seed}
+
+    def get(key):
+        return v.get(key, COST_DEFAULTS[key])
+
+    def weights(vals):
+        return _cost_parts({**vals, "batch_size": 1, "updates_per_step": 1})[1]
+
+    while relative_cost(v, seed) > cap:
+        updates, work = _cost_parts(v)
+        candidates = []
+        if updates > 1:
+            candidates.append((updates / seed_v["updates_per_step"], "updates_per_step"))
+        # Batch and widths only help while the update is bigger than the seed's.
+        if work > _cost_parts(seed)[1]:
+            if get("batch_size") > 16:
+                candidates.append((get("batch_size") / seed_v["batch_size"], "batch_size"))
+            dims = get("hidden_dims_critic") + get("hidden_dims_actor")
+            if any(d > 16 for d in dims):
+                candidates.append((weights(v) / weights(seed_v), "widths"))
+        if not candidates:
+            break
+        _, what = max(candidates)
+        if what == "updates_per_step":
+            v["updates_per_step"] = updates - 1
+        elif what == "batch_size":
+            v["batch_size"] = max(16, get("batch_size") // 2)
+        else:
+            for key in ("hidden_dims_critic", "hidden_dims_actor"):
+                v[key] = [max(16, int(round(d * 0.85))) for d in get(key)]
+    changes = {k: (values.get(k, COST_DEFAULTS.get(k)), v[k]) for k in v
+               if v[k] != values.get(k, COST_DEFAULTS.get(k))}
+    return v, changes
+
+
+def gene_overrides(path, report=None):
+    """Hydra overrides for train_xqc.py and the settings they set, for one gene file.
+
+    With LLMGE_XQC_COST_CAP set, an over-budget gene is shrunk first; report (a
+    dict) then receives cost_before, cost_after, cap and the changed keys.
+    """
+    values = gene_values(path)
+    cap = cost_cap()
+    if cap:
+        seed = gene_values(SEED_GENE)
+        before = relative_cost(values, seed)
+        values, changes = fit_cost_cap(values, seed, cap)
+        if report is not None:
+            report.update(cap=cap, cost_before=round(before, 3),
+                          cost_after=round(relative_cost(values, seed), 3), changed=changes)
     overrides, config = [], {}
-    for key, value in {**arch, **hyper}.items():
+    for key, value in values.items():
         if key in AGENT_KEYS:
             overrides.append(f"agent.{key}={validate(key, value, AGENT_KEYS[key])}")
-        elif key in TOP_KEYS:
-            overrides.append(f"{key}={validate(key, value, TOP_KEYS[key])}")
         else:
-            raise ValueError(f"unknown key {key!r}")
+            overrides.append(f"{key}={validate(key, value, TOP_KEYS[key])}")
         config[key] = value
     return overrides, config
 
@@ -178,11 +289,16 @@ def main():
         print(f"Mean reward: {FAILED}, Std: 0.0, Time: {train_time:.1f}s")
         print("Job Done")
 
+    cost = {}
     try:
-        overrides, config = gene_overrides(gene_path)
+        overrides, config = gene_overrides(gene_path, report=cost)
     except Exception as e:
         return fail(f"invalid gene: {e!r}")
     stats["config"] = config
+    if cost:
+        stats["cost_cap"] = cost
+        print(f"[cost cap] cost {cost['cost_before']}x seed (cap {cost['cap']}x)"
+              + (f", shrunk to {cost['cost_after']}x: {cost['changed']}" if cost["changed"] else ""), flush=True)
 
     os.makedirs(run_dir, exist_ok=True)
     cmd = [sys.executable, os.path.join(HERE, "train_xqc.py"),
