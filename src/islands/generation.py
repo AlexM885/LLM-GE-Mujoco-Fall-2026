@@ -38,19 +38,18 @@ class LegacyLLMGenerator:
     def __call__(
         self,
         config: IslandConfig,
-        generation: int,
-        population: list[Candidate],
+        gene_id: str,
+        parents: list[Candidate],
     ) -> GeneratedCode:
         workspace = config.workspace or self.repository_root / "islands" / config.island_id
         model_dir = workspace / "models"
         model_dir.mkdir(parents=True, exist_ok=True)
-        gene_id = f"{config.island_id}-g{generation}-{len(population)}"
         output_path = model_dir / f"network_{gene_id}.py"
 
-        bootstrap = config.operation == "crossover" and len(population) < 2
+        bootstrap = config.operation == "crossover" and len(parents) < 2
         operation = "mutation" if bootstrap else config.operation
         if operation == "mutation":
-            parent_path = self._parent_path(population)
+            parent_path = self._parent_path(parents)
             template_path = self._mutation_template(config)
             command = [
                 sys.executable,
@@ -60,7 +59,7 @@ class LegacyLLMGenerator:
                 str(template_path),
             ]
         else:
-            parent_paths = self._crossover_parents(population)
+            parent_paths = self._crossover_parents(parents)
             command = [
                 sys.executable,
                 str(self.script_root / "llm_crossover.py"),
@@ -108,18 +107,18 @@ class LegacyLLMGenerator:
             },
         )
 
-    def _parent_path(self, population: list[Candidate]) -> Path:
-        if not population:
+    def _parent_path(self, parents: list[Candidate]) -> Path:
+        if not parents:
             return self.seed_network
-        path = population[-1].metadata.get("source_path")
+        path = parents[0].metadata.get("source_path")
         return Path(path) if path else self.seed_network
 
-    def _crossover_parents(self, population: list[Candidate]) -> tuple[Path, Path]:
-        if len(population) < 2:
+    def _crossover_parents(self, parents: list[Candidate]) -> tuple[Path, Path]:
+        if len(parents) < 2:
             raise ValueError("crossover islands require at least two parent candidates")
         paths = [
             Path(candidate.metadata["source_path"])
-            for candidate in population[-2:]
+            for candidate in parents[-2:]
             if candidate.metadata.get("source_path")
         ]
         if len(paths) != 2:
