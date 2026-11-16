@@ -14,6 +14,7 @@
 #   LLMGE_HOSTNAME_FILE=<file>  use a shared LLM server instead of starting one
 #   LLMGE_VLM_HF_HOME=<dir>     Hugging Face cache with google/gemma-3-12b-it (vlm tier only)
 #   SERVER_JOBS / CONTROLLER_JOBS  length of the job chains (default 21 x 8 h servers, 10 x 18 h controllers)
+#   CONTROLLER_TIME             wall time of each controller job (default 18:00:00)
 set -euo pipefail
 cd "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 
@@ -55,6 +56,7 @@ GENE_GPUS="H100|H200"                          # gene GPU types (Slurm features)
 export LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS=$(( 3 * 3600 + 1800 ))  # > gene wall time; counts from job start
 export LLMGE_EVAL_MAX_QUEUE_SECONDS=$(( 48 * 3600 ))
 export LLMGE_REUSE_DUPLICATES=1                # identical genes reuse a result instead of retraining
+export LLMGE_XQC_COST_CAP=2                    # cost-cap: genes over 2x the seed's training cost are shrunk before training (train_xqc_gene.py)
 BAD_NODES="atl1-1-03-014-16-0,atl1-1-03-011-3-0,atl1-1-03-010-25-0"  # fail JAX CUDA init (Oct; 010-25-0 on Nov 14)
 # ---------------------------------------------------------------------------
 
@@ -68,7 +70,7 @@ case "$TIER" in
 esac
 
 # Repeat: own run name and training seeds (repeat 1: seeds 0-2, repeat 2: 1000-1002, ...).
-RUN="${TIER}_r${REPEAT}"
+RUN="cap_${TIER}_r${REPEAT}"                  # cost-cap: own run names and server port
 export LLMGE_TRAIN_SEED=$(( (REPEAT - 1) * 1000 ))
 export SEED="$LLMGE_TRAIN_SEED"                # the same seed for the sliding-boundaries driver
 export LLMGE_EXCLUDE_NODES="$BAD_NODES"
@@ -90,6 +92,7 @@ else
     export LLMGE_HOSTNAME_FILE="$PWD/$RUN/hostname.log"  # this run's own server
 fi
 CONTROLLERS="${CONTROLLER_JOBS:-10}"
+CTIME="${CONTROLLER_TIME:-18:00:00}"
 
 if [ "$TIER" = vlm ] && [ -z "${LLMGE_VLM_HF_HOME:-}" ]; then
     echo "vlm tier: set LLMGE_VLM_HF_HOME to a Hugging Face cache with google/gemma-3-12b-it" >&2; exit 1
@@ -105,16 +108,16 @@ fi
 SPEC=$(cat <<EOF
 run=$RUN tier=$TIER repeat=$REPEAT commit=$(git rev-parse --short HEAD) branch=$(git rev-parse --abbrev-ref HEAD) user=$USER date=$(date -Is)
 $(env | grep -E '^(LLMGE_|XQC_|MUJOCO_|USE_LLM_EMITTERS|GENE_SBATCH_FLAGS|SEED=|EXTRA_ARGS=|GPU_JOBS=)' | sort)
-servers=$SERVERS controllers=$CONTROLLERS
+servers=$SERVERS controllers=$CONTROLLERS controller_time=$CTIME
 EOF
 )
 echo "$SPEC"
 if [ "$DRY" = 1 ]; then
-    echo; echo "dry run: would run  scripts/llmge_chain.sh $RUN $SERVERS $CONTROLLERS"; exit 0
+    echo; echo "dry run: would run  scripts/llmge_chain.sh $RUN $SERVERS $CONTROLLERS $CTIME"; exit 0
 fi
 mkdir -p "$RUN"
 echo "$SPEC" > "$RUN/run_spec.txt"
-scripts/llmge_chain.sh "$RUN" "$SERVERS" "$CONTROLLERS"
+scripts/llmge_chain.sh "$RUN" "$SERVERS" "$CONTROLLERS" "$CTIME"
 echo
 echo "Launched $RUN. Settings: $RUN/run_spec.txt. Per-generation stats will appear in"
 echo "  $RUN/island_llama3_Mujoco-XQC/generation_stats.csv (sliding tier: mujoco_rl_output/$RUN/)"

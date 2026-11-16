@@ -188,6 +188,20 @@ if SEED == "xqc":
     #: together). Give each repeat of a tiered run its own base (scripts/tiered_run.sh),
     #: so repeats differ in training randomness, not only in what the LLM writes.
     XQC_TRAIN_SEED = int(os.getenv("LLMGE_TRAIN_SEED", "0"))
+    #: Training-cost cap (LLMGE_XQC_COST_CAP, read by sota/XQC/train_xqc_gene.py, which
+    #: shrinks over-budget genes before training). When on, the rules tell the LLM the
+    #: budget through rule 9b (<ROBOT_TASK_NOTE>).
+    XQC_COST_CAP = float(os.getenv("LLMGE_XQC_COST_CAP") or 0)
+    if XQC_COST_CAP:
+        ROBOT_TASK_NOTE = (ROBOT_TASK_NOTE + " " if ROBOT_TASK_NOTE else "") + (
+            f"Training-time budget: each gene may cost at most {XQC_COST_CAP:g}x the seed's training time. "
+            "Cost = (updates_per_step / 2) x max(1, (batch_size x network size) / the seed's), where the seed is "
+            "hidden_dims_critic=[512, 512, 512, 512], hidden_dims_actor=[256, 256, 256, 256], batch_size=256, "
+            "updates_per_step=2. For example updates_per_step=3 at the seed's size costs 1.5x, batch_size=512 at "
+            "the seed's size costs 2x, and hidden_dims_critic=[1024, 1024, 1024, 1024] with batch_size=256 costs "
+            "3.5x. Genes over budget are shrunk automatically before training (fewer updates, smaller batch or "
+            "narrower layers), so they are not trained as written. Within the budget, prefer the smallest network "
+            "and fewest updates that you expect to reach a high return: cheaper genes train faster.")
     FORBIDDEN_PATTERNS = [
         ("import ", "XQC genes return plain dicts; no imports"),
         ("open(", "file access"),
