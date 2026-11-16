@@ -22,7 +22,7 @@ All of these are set inside `scripts/tiered_run.sh`. You never type them yoursel
 | Archive | 32×32 MAP-Elites (left/right foot contact) | midterm config |
 | Budget | 10 generations' worth of steps (288M), compared at equal steps | fair compute for every tier |
 | Learning curve | every 25k steps (same as the midterm runs) | lets us redo the Kendall tau check |
-| Gene jobs | 2 genes per GPU job, 3 h wall time, 3.5 h no-progress timeout, 48 h max queue wait | timing test below |
+| Gene jobs | 2 genes per GPU job on H100/H200, 2 h wall time, 2.5 h no-progress timeout, 48 h max queue wait | timing + smoke tests below |
 | Speed-ups | GPU replay buffer, compile cache, duplicate reuse, queue-aware timeouts, gen-0 checkpoint, 2 genes per job | change speed, not results |
 | Training seeds per repeat | repeat 1: 0–2, repeat 2: 1000–1002, repeat 3: 2000–2002 | repeats differ in training luck too |
 
@@ -47,14 +47,16 @@ only about 2 at a time.
 | 2 genes packed on one GPU | ~27 min for both (~1.75× genes per GPU-hour) |
 | Evals every 25k instead of 50k | under 1 min extra |
 
-3 h leaves room for slower GPUs (RTX 6000 / V100 are about half as fast) and bigger evolved
-genes; we'll tighten it from the smoke test's `gene_train_max_min`. Three nodes that fail
+**Smoke test (Nov 15, `control_r99`, any GPU, 3 h):** Slurm put every gene job on a V100, RTX 6000
+or A40. A packed pair took 1.1–3 h there (median 137 min) and 4 of 23 jobs hit the 3 h limit, so
+generation 0 took 7.8 h. Gene jobs now ask for **H100/H200 only with a 2 h wall time** (every tier
+the same), which lets ~8 jobs (16 genes) run at once. A second smoke test (`control_r98`) checks it. Three nodes that fail
 JAX CUDA start-up are excluded (`BAD_NODES` in the script). The `sliding` tier gets the same
 gene wall time, timeout and bad-node list.
 
 ## Hard rules
 
-1. **Use the agreed branch and commit:** branch `Midterm-Merge`, code commit `a533fb845`. Check with
+1. **Use the agreed branch and commit:** branch `Midterm-Merge`, code commit `6d3a6dd6b`. Check with
    `git log -1 --format=%h -- . ':(exclude)docs'` (the last commit that changed code; doc-only commits after
    it are fine).
 2. **Don't edit any code or config**, and don't set any of the fixed settings yourself. The script refuses to
@@ -151,7 +153,7 @@ Their `run_spec.txt` shows the port. Only do this once the smoke test shows it w
 ```
 You are launching one LLM-GE tiered run on PACE-ICE for the MuJoCo VIP team.
 Follow docs/TIERED_RUNS.md exactly. Strict rules:
-- Use branch Midterm-Merge at code commit a533fb845. Verify with
+- Use branch Midterm-Merge at code commit 6d3a6dd6b. Verify with
   `git log -1 --format=%h -- . ':(exclude)docs'` before anything else.
 - Do NOT modify any file in the repo, and do NOT set or override any of these environment variables:
   LLMGE_*, XQC_*, MUJOCO_*, USE_LLM_EMITTERS, SEED, GENE_SBATCH_FLAGS

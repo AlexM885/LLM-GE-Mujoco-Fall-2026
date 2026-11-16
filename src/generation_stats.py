@@ -24,7 +24,7 @@ import os
 import statistics
 import time
 
-COLUMNS = ["generation", "time", "offspring", "trained_ok", "duplicates", "failed", "timeouts",
+COLUMNS = ["generation", "time", "offspring", "trained_ok", "duplicates", "unchanged", "failed", "timeouts",
            "archive_updates", "archive_cells", "archive_genes", "best", "median_archive", "qd_score",
            "successful_evals_total"]
 TIMING_COLUMNS = ["llm_min", "crossover_min", "mutation_min", "genes_min",
@@ -33,11 +33,18 @@ TIMING_COLUMNS = ["llm_min", "crossover_min", "mutation_min", "genes_min",
 COLUMNS = COLUMNS + TIMING_COLUMNS
 
 
-def classify(entry, failed_fitness, objective, sentinel):
-    """'duplicate', 'timeout', 'failed', 'trained_ok' or 'pending' for one GLOBAL_DATA entry."""
+def classify(entry, failed_fitness, objective, sentinel, since=None):
+    """'duplicate', 'unchanged', 'timeout', 'failed', 'trained_ok' or 'pending' for one GLOBAL_DATA entry.
+
+    'unchanged': an offspring whose crossover / mutation failed, so it is a copy of its parent
+    and kept the parent's result (its record predates this generation, `since`).
+    """
     status = str(entry.get("status", ""))
     if entry.get("duplicate_of"):
         return "duplicate"
+    created = entry.get("start_time")
+    if since is not None and created is not None and created < since:
+        return "unchanged"
     if "TIMEOUT" in status:
         return "timeout"
     metrics = entry.get("metrics") or {}
@@ -49,11 +56,11 @@ def classify(entry, failed_fitness, objective, sentinel):
 
 
 def generation_row(generation, offspring_entries, archive_qualities, archive_cells, archive_updates,
-                   successful_evals_total, failed_fitness, objective, sentinel, now=None):
-    """One generation_stats.csv row (a dict keyed by COLUMNS)."""
-    counts = {"trained_ok": 0, "duplicate": 0, "failed": 0, "timeout": 0, "pending": 0}
+                   successful_evals_total, failed_fitness, objective, sentinel, now=None, since=None):
+    """One generation_stats.csv row (a dict keyed by COLUMNS, timing columns blank)."""
+    counts = {"trained_ok": 0, "duplicate": 0, "unchanged": 0, "failed": 0, "timeout": 0, "pending": 0}
     for entry in offspring_entries:
-        counts[classify(entry, failed_fitness, objective, sentinel)] += 1
+        counts[classify(entry, failed_fitness, objective, sentinel, since)] += 1
     q = [x for x in archive_qualities if x is not None]
     return {
         "generation": generation,
@@ -61,6 +68,7 @@ def generation_row(generation, offspring_entries, archive_qualities, archive_cel
         "offspring": len(offspring_entries),
         "trained_ok": counts["trained_ok"],
         "duplicates": counts["duplicate"],
+        "unchanged": counts["unchanged"],
         "failed": counts["failed"] + counts["pending"],
         "timeouts": counts["timeout"],
         "archive_updates": archive_updates,

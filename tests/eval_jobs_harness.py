@@ -5,7 +5,8 @@
 Fake sbatch runs each job script in the background with bash; fake genes write a
 results CSV and print "Job Done" (or crash). Checks: packing 2 genes per job,
 a crashing gene inside a pack, one gene per job (old path), duplicate genes inside a
-packed batch (Alex's duplicate reuse), and gen-0 checkpoint resume.
+packed batch (Alex's duplicate reuse), a parent copy after a failed variation, and
+gen-0 checkpoint resume.
 """
 import os
 import sys
@@ -104,7 +105,22 @@ expect(rim.GLOBAL_DATA["dupB"].get("duplicate_of") == "dupA", "dupB recognised a
 expect(fits["dupB"] == fits["dupA"] and fits["dupA"][0] == 400, "dupB got dupA's result")
 expect(len({j for j in jobs if not str(j).startswith("duplicate")}) == 2, "3 trained genes went into 2 jobs")
 
-# 4) gen-0 checkpoint resumes at generation 1
+# 4) a failed crossover / mutation reverts the child to its parent's id, and update_individual
+#    drops that id from GLOBAL_DATA: the copy keeps the parent's result, and the parent's record
+#    in GLOBAL_DATA_HIST is not overwritten (it used to become invalid, undercounting the budget).
+rim.GLOBAL_DATA_HIST.update(rim.GLOBAL_DATA.copy())
+before = rim.count_successful_evals(rim.GLOBAL_DATA, rim.GLOBAL_DATA_HIST)
+parent_fit = tuple(rim.GLOBAL_DATA["eeeee"]["fitness"])
+del rim.GLOBAL_DATA["eeeee"]
+copy = rim.creator.Individual(["eeeee"])
+copy.fitness.values = rim.PLACEHOLDER_FITNESS
+rim.check_and_update_fitness([copy], timeout=120, loop_delay=2)
+rim.GLOBAL_DATA_HIST.update(rim.GLOBAL_DATA.copy())
+expect(tuple(copy.fitness.values) == parent_fit, "parent copy kept the parent's result without retraining")
+expect(rim.count_successful_evals(rim.GLOBAL_DATA, rim.GLOBAL_DATA_HIST) == before,
+       f"successful-gene count unchanged ({before})")
+
+# 5) gen-0 checkpoint resumes at generation 1
 ck, gp = os.path.join(work, "ck"), os.path.join(work, "global")
 rim.population, rim.hof = make_population(["ffffff"]), rim.tools.ParetoFront()
 rim.save_checkpoint(0, folder_name=ck, global_path=gp)

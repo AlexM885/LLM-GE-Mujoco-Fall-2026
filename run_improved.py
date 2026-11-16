@@ -841,6 +841,12 @@ def check_and_update_fitness(population, timeout=EVAL_NO_PROGRESS_TIMEOUT_SECOND
         for ind in population:
             gene_id = ind[0]
             # check if failed job
+            if gene_id not in GLOBAL_DATA and has_real_result(GLOBAL_DATA_HIST.get(gene_id) or {}):
+                # A crossover / mutation failed and the child reverted to its parent's id
+                # (update_individual drops that id from GLOBAL_DATA): keep the parent's known
+                # result. Writing an invalid entry here used to overwrite the parent's record in
+                # GLOBAL_DATA_HIST, which undercounted successful genes (the step budget).
+                GLOBAL_DATA[gene_id] = dict(GLOBAL_DATA_HIST[gene_id])
             if gene_id not in GLOBAL_DATA:
                 GLOBAL_DATA[gene_id] = {'sub_flag':False, 'job_id':'None', 'status':'completed', 
                                         'fitness':INVALID_FITNESS_MAX, 'start_time':time.time()}
@@ -1854,10 +1860,11 @@ def write_generation_stats(gen, folder_name, offspring, updated_genes, phases=No
         updates = updated_genes[0] if isinstance(updated_genes, tuple) else len(updated_genes or ())
         row = generation_row(gen, entries, qualities, cells, updates,
                              count_successful_evals(GLOBAL_DATA, GLOBAL_DATA_HIST), INVALID_FITNESS_MAX,
-                             MAP_ELITES_OBJECTIVE, FAILED_EVAL_SENTINEL)
+                             MAP_ELITES_OBJECTIVE, FAILED_EVAL_SENTINEL, since=phases.get("start"))
         row.update(timing_columns(phases, entries, phases.get("start", 0)))
         path = append_generation_stats(folder_name, row)
         print(f"\t‣ Generation {gen}: {row['trained_ok']} trained, {row['duplicates']} duplicates, "
+              f"{row['unchanged']} unchanged parent copies, "
               f"{row['failed']} failed, {row['timeouts']} timeouts, {row['archive_updates']} archive updates "
               f"({path})", flush=True)
         print(f"\t‣ Generation {gen} minutes: LLM {row['llm_min']}, genes {row['genes_min']} "

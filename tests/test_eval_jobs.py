@@ -137,6 +137,11 @@ def test_classify_gene_outcomes():
     assert classify({"status": "completed", "fitness": INVALID}, INVALID, "mean_reward", -999999.0) == "failed"
     sentinel = {"status": "completed", "metrics": {"mean_reward": -999999.0}}
     assert classify(sentinel, INVALID, "mean_reward", -999999.0) == "failed"
+    # a parent copy left by a failed crossover / mutation: its record is older than the generation
+    parent = {**ok, "start_time": 100.0}
+    assert classify(parent, INVALID, "mean_reward", -999999.0, since=500.0) == "unchanged"
+    assert classify({**ok, "start_time": 600.0}, INVALID, "mean_reward", -999999.0, since=500.0) == "trained_ok"
+    assert classify(parent, INVALID, "mean_reward", -999999.0) == "trained_ok"   # generation 0: no `since`
 
 
 def test_generation_row_and_csv(tmp_path):
@@ -146,6 +151,7 @@ def test_generation_row_and_csv(tmp_path):
                {"status": "completed", "fitness": INVALID}]
     row = generation_row(3, entries, [100.0, 500.0, 300.0], 3, 2, 40, INVALID, "mean_reward", -999999.0, now=0)
     assert (row["offspring"], row["trained_ok"], row["duplicates"], row["timeouts"], row["failed"]) == (4, 1, 1, 1, 1)
+    assert row["unchanged"] == 0
     assert (row["archive_updates"], row["archive_cells"], row["best"], row["median_archive"], row["qd_score"]) \
         == (2, 3, 500.0, 300.0, 900.0)
     path = append_row(str(tmp_path), row)
@@ -212,7 +218,7 @@ def test_tiered_run_fixed_settings_same_for_every_tier():
     assert s["XQC_EVAL_TIMESTEPS"] == "300000" and s["XQC_EVAL_SEEDS"] == "3"
     assert s["LLMGE_XQC_EVAL_INTERVAL"] == "25000" and s["LLMGE_GENES_PER_JOB"] == "2"
     # the sliding tier's gene jobs get the same wall time and bad-node list as the others
-    assert s["GENE_SBATCH_FLAGS"].startswith(f"-t {s['LLMGE_GENE_TIME']} --exclude=")
+    assert s["GENE_SBATCH_FLAGS"].startswith(f"-t {s['LLMGE_GENE_TIME']} -C H100|H200 --exclude=")
     assert "atl1-1-03-010-25-0" in s["GENE_SBATCH_FLAGS"]
     assert (settings["control"]["USE_LLM_EMITTERS"], settings["emitters"]["USE_LLM_EMITTERS"]) == ("0", "1")
     assert settings["sliding"]["LLMGE_SLIDING_BOUNDARIES"] == "1"
