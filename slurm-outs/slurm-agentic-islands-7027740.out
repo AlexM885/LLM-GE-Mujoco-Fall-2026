@@ -1,0 +1,27 @@
+---------------------------------------
+Begin Slurm Prolog: Nov-13-2026 19:28:30
+Job ID:    7027740
+User ID:   amishra447
+Account:   coc
+Job name:  agentic-islands
+Partition: ice-gpu
+QOS:       coe-ice
+---------------------------------------
+Host: atl1-1-02-009-32-0.pace.gatech.edu  Root: /home/hice1/amishra447/scratch/LLM-GE-Mujoco-Fall-2026  Data: /storage/ice1/8/1/amishra447/LLM-GE-Mujoco-Fall-2026/sota/ExquisiteNetV2/cifar10
+
+EnvironmentNameNotFound: Could not find conda environment: llm_guided_env
+You can list all discoverable environments with `conda info --envs`.
+
+
+---------------------------------------
+Begin Slurm Epilog: Nov-13-2026 19:28:36
+Job ID:        7027740
+User ID:       amishra447
+Account:       coc
+Job name:      agentic-islands
+Resources:     cpu=4,gres/gpu:v100=1,mem=16G,node=1
+Rsrc Used:     cput=00:00:36,vmem=0,walltime=00:00:09,mem=40332K,energy_used=0
+Partition:     ice-gpu
+QOS:           coe-ice
+Nodes:         atl1-1-02-009-32-0
+---------------------------------------
