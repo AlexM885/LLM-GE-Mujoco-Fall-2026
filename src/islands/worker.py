@@ -11,7 +11,7 @@ from .models import Candidate, Fitness
 from .validation import CandidateValidator
 
 CodeGenerator = Callable[
-    [IslandConfig, int, list[Candidate]], Union[str, GeneratedCode]
+    [IslandConfig, str, list[Candidate]], Union[str, GeneratedCode]
 ]
 Evaluator = Callable[[Candidate], Fitness]
 
@@ -36,7 +36,9 @@ class IslandWorker:
         results: list[Candidate] = []
         for index in range(self.config.candidates_per_cycle):
             gene_id = f"{self.config.island_id}-g{generation}-{index}"
-            generated = self.generator(self.config, generation, self.population)
+            parent_count = 2 if self.config.operation == "crossover" else 1
+            parents = self.population[:parent_count]
+            generated = self.generator(self.config, gene_id, parents)
             if isinstance(generated, GeneratedCode):
                 code = generated.code
                 metadata = {
@@ -52,7 +54,7 @@ class IslandWorker:
                 generation=generation,
                 strategy=self.config.strategy,
                 code=code,
-                parents=[self.population[-1].gene_id] if self.population else [],
+                parents=[parent.gene_id for parent in parents],
                 metadata=metadata,
             )
             candidate.validation = self.validator.validate(candidate)
