@@ -30,6 +30,7 @@ class IslandCoordinator:
             for config in configs
         }
         self.archive = ParetoArchive()
+        self.migration_events: list[dict[str, str | bool | int]] = []
         self.max_workers = max_workers or len(self.workers)
 
     def run(self, generations: int, migrate_every: int = 1) -> list[Candidate]:
@@ -46,12 +47,15 @@ class IslandCoordinator:
             evaluated = [candidate for batch in batches for candidate in batch]
             self.archive.update(evaluated)
             if migrate_every > 0 and (generation + 1) % migrate_every == 0:
-                self._migrate()
+                self._migrate(generation+1)
         return self.archive.candidates()
 
-    def _migrate(self) -> None:
+    def _migrate(self, completed_generations: int) -> None:
         migrants = select_migrants(self.archive.candidates(), 1)
         if not migrants:
             return
         for worker in self.workers.values():
-            worker.receive(migrants)
+            for event in worker.receive(migrants):
+                self.migration_events.append(
+                    {**event, "generation": completed_generations}
+                )

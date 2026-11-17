@@ -145,6 +145,12 @@ def main() -> None:
     output = args.output if args.output.is_absolute() else root / args.output
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps([candidate.to_dict() for candidate in archive], indent=2))
+    migration_output = output.with_name(f"{output.stem}_migration.json")
+    migration_output.write_text(
+        json.dumps(coordinator.migration_events, indent=2),
+        encoding="utf-8",
+    )
+    print(f"Saved migration events to {migration_output}")
     print(f"Saved {len(archive)} archived candidates to {output}")
 
 

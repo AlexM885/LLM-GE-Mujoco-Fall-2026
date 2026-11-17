@@ -34,6 +34,17 @@ def test_migration_changes_parent_selection(migrate_every, expected_parent):
     child = evaluated["b-g1-0"]
     assert parents_used[child.gene_id] == [expected_parent]
     assert child.parents == [expected_parent]
+    if migrate_every:
+        assert {
+            "source_island": "a",
+            "destination_island": "b",
+            "original_gene_id": "a-g0-0",
+            "imported_gene_id": "b-import-a-g0-0",
+            "retained": True,
+            "generation": 1,
+        } in coordinator.migration_events
+    else:
+        assert coordinator.migration_events == []
 def test_crossover_records_both_selected_parents():
     from src.islands import Candidate
     from src.islands.worker import IslandWorker
@@ -58,3 +69,62 @@ def test_crossover_records_both_selected_parents():
 
     assert parents_used == ["migrant", "local"]
     assert child.parents == parents_used
+def test_receive_records_migrant_dropped_by_population_selection():
+    from src.islands import Candidate
+    from src.islands.worker import IslandWorker
+
+    worker = IslandWorker(
+        IslandConfig("b", "test", population_size=1),
+        generator=lambda *_: "",
+        evaluator=lambda candidate: Fitness(accuracy=0.9, parameters=100),
+    )
+    local = Candidate("b-g0-0", "b", 0, "test", "", fitness=Fitness(0.9, 100))
+    migrant = Candidate("a-g0-0", "a", 0, "test", "", fitness=Fitness(0.8, 100))
+    worker.population = [local]
+
+    events = worker.receive([migrant])
+
+    assert len(events) == 1
+    assert events[0]["imported_gene_id"] == "b-import-a-g0-0"
+    assert events[0]["retained"] is False
+    assert worker.population == [local]
+def test_runner_writes_migration_events(tmp_path, monkeypatch):
+    import json
+    import sys
+
+    import run_AgenticIslands as runner
+
+    event = {
+        "source_island": "a",
+        "destination_island": "b",
+        "original_gene_id": "a-g0-0",
+        "imported_gene_id": "b-import-a-g0-0",
+        "retained": True,
+        "generation": 1,
+    }
+
+    class FakeCoordinator:
+        def __init__(self, **kwargs):
+            self.migration_events = [event]
+
+        def run(self, generations, migrate_every):
+            return []
+
+    output = tmp_path / "results.json"
+    monkeypatch.setattr(runner, "IslandCoordinator", FakeCoordinator)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_AgenticIslands.py",
+            "--root", str(tmp_path),
+            "--data", str(tmp_path),
+            "--output", str(output),
+        ],
+    )
+
+    runner.main()
+
+    assert json.loads(output.read_text(encoding="utf-8")) == []
+    migration_output = tmp_path / "results_migration.json"
+    assert json.loads(migration_output.read_text(encoding="utf-8")) == [event]
