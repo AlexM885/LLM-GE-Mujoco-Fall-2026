@@ -69,7 +69,9 @@ class IslandWorker:
         self.population = self._select_population()
         return results
 
-    def receive(self, migrants: list[Candidate]) -> None:
+    def receive(self, migrants: list[Candidate]) -> list[dict[str, str | bool]]:
+        imports: list[tuple[Candidate, Candidate]] = []
+
         for candidate in migrants:
             imported = replace(
                 candidate,
@@ -78,8 +80,20 @@ class IslandWorker:
                 metadata={**candidate.metadata, "migrated_from": candidate.island_id},
             )
             self.population.append(imported)
+            imports.append((candidate, imported))
+
         self.population = self._select_population()
 
+        return [
+            {
+                "source_island": original.island_id,
+                "destination_island": imported.island_id,
+                "original_gene_id": original.gene_id,
+                "imported_gene_id": imported.gene_id,
+                "retained": any(member is imported for member in self.population),
+            }
+            for original, imported in imports
+        ]
     def _select_population(self) -> list[Candidate]:
         ranked = sorted(
             self.population,
