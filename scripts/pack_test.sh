@@ -13,7 +13,7 @@
 # copy's training time, the job's genes per hour, GPU use and peak memory.
 #
 #   sbatch [-C <gpu type>] [-c cores] [--mem RAM] scripts/pack_test.sh <N> <gene .py file> [timesteps]
-#   e.g. sbatch -C V100 -c 16 --mem 64G -t 6:00:00 scripts/pack_test.sh 8 sota/XQC/llmge/network.py
+#   e.g. sbatch -C gpu-v100 -c 12 --mem 64G -t 6:00:00 scripts/pack_test.sh 8 sota/XQC/llmge/network.py
 #
 # PACK_THREADS=<k> (optional, in the submitting shell) caps each gene's CPU math
 # threads (OMP/OpenBLAS/MKL) at k, so N genes don't fight over the job's cores.

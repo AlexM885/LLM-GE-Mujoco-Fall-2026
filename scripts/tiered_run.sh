@@ -68,7 +68,7 @@ export LLMGE_TRAIN_SEED=$(( (REPEAT - 1) * 1000 ))
 export SEED="$LLMGE_TRAIN_SEED"                # the same seed for the sliding-boundaries driver
 export LLMGE_EXCLUDE_NODES="$BAD_NODES"
 # Same wall time for the sliding tier's gene jobs (its job script defaults to 1:30:00).
-export GENE_SBATCH_FLAGS="-t $LLMGE_GENE_TIME -C V100 -c 16 --mem 64G --exclude=$BAD_NODES"   # pack8-v100: V100 (what cap_control_r1 genes got), cores and RAM for 8 genes
+export GENE_SBATCH_FLAGS="-t $LLMGE_GENE_TIME -C gpu-v100 -c 12 --mem 64G --exclude=$BAD_NODES"   # pack8-v100: V100-16GB (what cap_control_r1 genes got; nodes have 24 cores), RAM for 8 genes
 # Sliding tier (run_mesb.py): its gene timeout covers queue + training, so give it the same
 # queue limit plus gene time as the other tiers, and keep a whole generation in flight.
 export EXTRA_ARGS="--eval-timeout $(( LLMGE_EVAL_MAX_QUEUE_SECONDS + LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS ))"
