@@ -30,10 +30,6 @@ export SERVER_HOSTNAME=$(hostname)
 HOSTNAME_FILE="${LLMGE_HOSTNAME_FILE:-$(pwd)/hostname.log}"
 mkdir -p "$(dirname "$HOSTNAME_FILE")"
 
-# Write hostname to file so tests can find the server
-echo "$SERVER_HOSTNAME" > "$HOSTNAME_FILE"
-echo "Wrote hostname to $HOSTNAME_FILE"
-
 # Log the island controller setting for debugging
 echo "SUBMIT_ISLAND_CONTROLLER=${SUBMIT_ISLAND_CONTROLLER:-<not set>}"
 
@@ -48,4 +44,20 @@ fi
 
 export LLMGE_PORT="${LLMGE_PORT:-8169}"
 echo "Starting LLM server on port ${LLMGE_PORT}"
-uv run python -m uvicorn server:app --host "$SERVER_HOSTNAME" --port "$LLMGE_PORT" --workers 1
+uv run python -m uvicorn server:app --host "$SERVER_HOSTNAME" --port "$LLMGE_PORT" --workers 1 &
+SERVER_PID=$!
+
+# Write the hostname file (controllers and tests find the server through it) only once the
+# server answers: loading the model takes ~13 min, and a server that dies on start-up (a bad
+# GPU node) must not take the file over from one that is still serving (scripts/shared_server.sh
+# overlaps two server chains on one file).
+until curl -sf -m 5 -o /dev/null "http://${SERVER_HOSTNAME}:${LLMGE_PORT}/"; do
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "LLM server exited before it was ready; $HOSTNAME_FILE left unchanged"
+        wait "$SERVER_PID"; exit 1
+    fi
+    sleep 15
+done
+echo "$SERVER_HOSTNAME" > "$HOSTNAME_FILE"
+echo "LLM server ready; wrote hostname to $HOSTNAME_FILE"
+wait "$SERVER_PID"

@@ -84,7 +84,16 @@ def update_eval_clock(entry, pending, now, max_queue_seconds=0):
     pushing it forward while the job is pending starts the clock at job start.
     Returns True if the job has waited in the queue longer than
     max_queue_seconds (0 = no limit) and should be given up on.
+
+    A duplicate waiting for an identical gene (entry 'duplicate_of') has no job of its own,
+    so its clock is held for as long as it waits. The original has its own timeout, and if
+    the original fails, check_duplicate trains the copy itself with a fresh clock. Without
+    this, copies of a gene that queued for long timed out with -inf while the original
+    succeeded (smoke test control_r98, Nov 16: 8 of 21 duplicates in generation 0).
     """
+    if entry.get("duplicate_of"):
+        entry["eval_start_time"] = now
+        return False
     if pending is None or str(entry.get("results_job")) not in pending:
         return False
     entry["eval_start_time"] = now
