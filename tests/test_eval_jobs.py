@@ -84,6 +84,17 @@ def test_update_eval_clock_holds_clock_while_pending():
     assert entry["eval_start_time"] == 500.0          # running: clock left alone from here on
 
 
+def test_update_eval_clock_holds_duplicates_waiting_on_their_original():
+    # control_r98 gen 0: copies of a gene that queued ~2 h timed out with -inf while the original
+    # trained fine, because "duplicate of X" is never a pending job id.
+    entry = {"results_job": "duplicate of A", "duplicate_of": "A", "eval_start_time": 0.0}
+    for now in (3600.0, 9000.0, 20_000.0):
+        assert update_eval_clock(entry, {"123"}, now=now, max_queue_seconds=60) is False
+        assert entry["eval_start_time"] == now     # never counts toward the no-progress timeout
+    assert update_eval_clock(entry, None, now=30_000.0) is False
+    assert entry["eval_start_time"] == 30_000.0
+
+
 def test_update_eval_clock_unknown_queue_leaves_clock_alone():
     entry = {"results_job": "123", "eval_start_time": 10.0, "submit_time": 10.0}
     assert update_eval_clock(entry, None, now=500.0) is False
@@ -133,6 +144,8 @@ def test_classify_gene_outcomes():
     assert classify(ok, INVALID, "mean_reward", -999999.0) == "trained_ok"
     assert classify({**ok, "duplicate_of": "x"}, INVALID, "mean_reward", -999999.0) == "duplicate"
     assert classify({"status": "FAILED: TIMEOUT"}, INVALID, "mean_reward", -999999.0) == "timeout"
+    assert classify({"status": "FAILED: TIMEOUT", "duplicate_of": "x"}, INVALID, "mean_reward",
+                    -999999.0) == "timeout"
     assert classify({"status": "FAILED: QUEUE TIMEOUT"}, INVALID, "mean_reward", -999999.0) == "timeout"
     assert classify({"status": "completed", "fitness": INVALID}, INVALID, "mean_reward", -999999.0) == "failed"
     sentinel = {"status": "completed", "metrics": {"mean_reward": -999999.0}}

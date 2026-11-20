@@ -44,11 +44,15 @@ export LLMGE_XQC_EVAL_INTERVAL=25000           # learning curve (eval.csv) every
 # Timing test (Nov 14, H200): the seed gene trains 300k x 3 seeds in ~24 min alone, and two
 # packed on one GPU take ~27 min together. Smoke test (Nov 15): on any GPU, Slurm gave every gene
 # job a V100 / RTX 6000 / A40, where a packed pair took 1.1-3 h and 4 of 23 hit a 3 h limit.
-# So gene jobs ask for H100 / H200 only, with a 2 h wall time.
+# So gene jobs ask for H100 / H200 only. Smoke test 2 (Nov 16, H100/H200): packed pairs took
+# 43-53 min in gen 0 and up to 82 min in gen 1, but evolved genes keep growing (uncapped genes
+# reached 5-8x the seed's training time in Alex's 500k run), and a pair dies together at the
+# wall time. 3 h keeps timeouts from cutting off big genes; runs without their own LLM server
+# (shared server) still fit ~10 jobs (20 genes) in 32 GPU-hours at once, more as jobs finish.
 export LLMGE_GENES_PER_JOB=2                   # two genes share one GPU job (~1.75x genes per GPU-hour)
-export LLMGE_GENE_TIME=2:00:00                 # gene job wall time
+export LLMGE_GENE_TIME=3:00:00                 # gene job wall time
 GENE_GPUS="H100|H200"                          # gene GPU types (Slurm features)
-export LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS=$(( 2 * 3600 + 1800 ))  # > gene wall time; counts from job start
+export LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS=$(( 3 * 3600 + 1800 ))  # > gene wall time; counts from job start
 export LLMGE_EVAL_MAX_QUEUE_SECONDS=$(( 48 * 3600 ))
 export LLMGE_REUSE_DUPLICATES=1                # identical genes reuse a result instead of retraining
 BAD_NODES="atl1-1-03-014-16-0,atl1-1-03-011-3-0,atl1-1-03-010-25-0"  # fail JAX CUDA init (Oct; 010-25-0 on Nov 14)

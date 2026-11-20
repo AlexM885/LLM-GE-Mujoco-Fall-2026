@@ -40,6 +40,8 @@ def classify(entry, failed_fitness, objective, sentinel, since=None):
     and kept the parent's result (its record predates this generation, `since`).
     """
     status = str(entry.get("status", ""))
+    if "TIMEOUT" in status:  # before 'duplicate': a copy that timed out is a timeout, not a reuse
+        return "timeout"
     if entry.get("duplicate_of"):
         return "duplicate"
     created = entry.get("start_time")
