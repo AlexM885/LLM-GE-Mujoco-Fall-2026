@@ -44,7 +44,7 @@ export LLMGE_XQC_EVAL_INTERVAL=25000           # learning curve (eval.csv) every
 # (the LLM server holds 16), so the wall time we ask for decides how many genes run at once.
 # Timing test (Nov 14, H200): the seed gene trains 300k x 3 seeds in ~24 min alone, and two
 # packed on one GPU take ~27 min together. 3 h leaves room for slower GPUs and big evolved genes.
-export LLMGE_GENES_PER_JOB=2                   # two genes share one GPU job (~1.75x genes per GPU-hour)
+export LLMGE_GENES_PER_JOB=8                   # pack8-h200: eight genes share one H200 job (the GPU idles with 2)
 export LLMGE_GENE_TIME=2:30:00                 # cost-cap: ~0.7 h per 1x cost at 300k packed (500k run, Nov 15) -> <= ~1.4 h at 2x; 2.5 h fits 6 jobs in 16 GPU-h
 export LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS=$(( 3 * 3600 ))  # > gene wall time; counts from job start
 export LLMGE_EVAL_MAX_QUEUE_SECONDS=$(( 48 * 3600 ))
@@ -63,12 +63,12 @@ case "$TIER" in
 esac
 
 # Repeat: own run name and training seeds (repeat 1: seeds 0-2, repeat 2: 1000-1002, ...).
-RUN="cap_${TIER}_r${REPEAT}"                  # cost-cap: own run names and server port
+RUN="p8_${TIER}_r${REPEAT}"                   # pack8-h200: own run names and server port
 export LLMGE_TRAIN_SEED=$(( (REPEAT - 1) * 1000 ))
 export SEED="$LLMGE_TRAIN_SEED"                # the same seed for the sliding-boundaries driver
 export LLMGE_EXCLUDE_NODES="$BAD_NODES"
 # Same wall time for the sliding tier's gene jobs (its job script defaults to 1:30:00).
-export GENE_SBATCH_FLAGS="-t $LLMGE_GENE_TIME --exclude=$BAD_NODES"
+export GENE_SBATCH_FLAGS="-t $LLMGE_GENE_TIME -C H200 -c 24 --mem 64G --exclude=$BAD_NODES"   # pack8-h200: H200 only (V100s were 3-4x slower), cores and RAM for 8 genes
 # Sliding tier (run_mesb.py): its gene timeout covers queue + training, so give it the same
 # queue limit plus gene time as the other tiers, and keep a whole generation in flight.
 export EXTRA_ARGS="--eval-timeout $(( LLMGE_EVAL_MAX_QUEUE_SECONDS + LLMGE_EVAL_NO_PROGRESS_TIMEOUT_SECONDS ))"
