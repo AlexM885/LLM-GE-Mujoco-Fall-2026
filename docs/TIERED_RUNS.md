@@ -86,9 +86,23 @@ generation 0), and `generation_stats.csv` counted them as duplicates, not timeou
    git clone https://github.com/AlexM885/LLM-GE-Mujoco-Fall-2026.git llmge && cd llmge
    git checkout Midterm-Merge             # then check the code commit (rule 1)
    ```
-3. Python environments: the controller uses the repo's uv project (`module load uv && uv sync`); XQC genes
-   use the XQC venv. Follow `sota/XQC/README.md` (setup section) once. If you already ran Shazeb's
-   HalfCheetah XQC config, you have it.
+3. Python environments: the controller uses the repo's uv project, XQC genes use the XQC venv
+   (`~/scratch/xqc-baseline/venv`). uv caches downloads in `~/.cache/uv` by default, which fills the 30 GB
+   home quota ("Disk quota exceeded"), so move its caches to scratch first. From the repo folder:
+   ```bash
+   cat >> ~/.bashrc <<'EOF'
+   export UV_CACHE_DIR=$(readlink -f ~/scratch)/.cache/uv
+   export UV_PYTHON_INSTALL_DIR=$(readlink -f ~/scratch)/.local/uv-python
+   export XDG_CACHE_HOME=$(readlink -f ~/scratch)/.cache
+   EOF
+   source ~/.bashrc
+   rm -rf ~/.cache/uv                                  # just a download cache
+   module load uv && uv sync                           # controller environment
+   bash sota/XQC/pace/install_env.sh                   # XQC venv (pinned versions)
+   git checkout -- sota/XQC/requirements.lock.txt      # the installer rewrites this tracked file
+   git status --untracked-files=no                     # must show nothing changed
+   ```
+   Without the `git checkout` line, `tiered_run.sh` refuses to launch ("Uncommitted changes").
 4. VLM tier only: a Hugging Face cache with `google/gemma-3-12b-it` (accept its license on Hugging Face
    first), passed as `LLMGE_VLM_HF_HOME`.
 
