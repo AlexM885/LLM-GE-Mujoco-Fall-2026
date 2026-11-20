@@ -5,7 +5,7 @@ We are rerunning the midterm comparison properly: a **control** run and one run 
 t-test per generation (Lecture 6, *Statistics for EMADE*). For that to mean anything, **every run must
 use exactly the same code and settings except its tier**. This page is how to make sure yours does.
 
-> **Status (Nov 19): ready for the baseline.** First real runs: `control` × 3 (Caleb, Suhan, Aayush) over
+> **Status (Nov 19): ready for the baseline.** First real runs: `control` × 3 (Caleb, Suhan, Valerie) over
 > Thanksgiving week, all on Shazeb's shared LLM server ([Baseline runs](#baseline-runs-control--3-thanksgiving-week)).
 > The other tiers follow once the baseline is in.
 
@@ -149,7 +149,7 @@ The `sliding` tier writes the same timing columns into `mujoco_rl_output/sliding
 |---|---|---|
 | control_r1 | Caleb | Shazeb's shared server |
 | control_r2 | Suhan | Shazeb's shared server |
-| control_r3 | Aayush | Shazeb's shared server |
+| control_r3 | Valerie | Shazeb's shared server |
 
 Why this way: Slurm's fairshare is per user, and Shazeb's is ~0 after the speed-up tests, so his gene jobs
 waited ~2 h each in smoke test 2. Each run launches from **its own person's account**. Shazeb hosts one
@@ -234,7 +234,7 @@ Follow docs/TIERED_RUNS.md exactly. Strict rules:
 |---|---|---|---|
 | control_r1 | Caleb |  |  |
 | control_r2 | Suhan |  |  |
-| control_r3 | Aayush |  |  |
+| control_r3 | Valerie |  |  |
 | vlm_r1 |  |  |  |
 | vlm_r2 |  |  |  |
 | vlm_r3 |  |  |  |
