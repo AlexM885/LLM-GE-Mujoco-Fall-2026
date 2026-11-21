@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -J packtest_mjx
 #SBATCH -p ice-gpu
-#SBATCH -C nvidia-gpu
-#SBATCH -G V100:1
+#SBATCH -C gpu-v100
+#SBATCH -G 1
 #SBATCH -c 12
 #SBATCH --mem 32G
 #SBATCH -t 3:00:00
@@ -13,9 +13,9 @@
 # Walker2d-v5 simulated by MJX, whole training loop compiled on the GPU) and
 # prints each copy's time, the job's genes per hour, GPU use and peak memory.
 #
-#   sbatch [-G <gpu type>:1] scripts/pack_test_mjx.sh <N> <gene .py file> [timesteps]
+#   sbatch [-C <gpu feature>] scripts/pack_test_mjx.sh <N> <gene .py file> [timesteps]
 #   e.g. sbatch scripts/pack_test_mjx.sh 3 sota/XQC/llmge/network.py   (V100 by default)
-#        sbatch -G H200:1 scripts/pack_test_mjx.sh 3 sota/XQC/llmge/network.py
+#        sbatch -C gpu-h200 scripts/pack_test_mjx.sh 3 sota/XQC/llmge/network.py   (features: sinfo -p ice-gpu -o "%f")
 #
 # Same settings as pack_test.sh (3 seeds, 10 eval episodes, shared JAX compile
 # cache). There are no evaluations during training (pack_test.sh's every-25k
@@ -24,7 +24,7 @@
 set -uo pipefail
 if [ $# -lt 2 ]; then
     echo "pack_test_mjx.sh got $# argument(s): '$*'. Usage (arguments go AFTER the script name):" >&2
-    echo "  sbatch [-G <gpu type>:1] [-t H:MM:SS] scripts/pack_test_mjx.sh <N> <gene .py file> [timesteps]" >&2
+    echo "  sbatch [-C <gpu feature>] [-t H:MM:SS] scripts/pack_test_mjx.sh <N> <gene .py file> [timesteps]" >&2
     exit 1
 fi
 N=$1; SRC=$2; STEPS=${3:-300000}
@@ -38,17 +38,24 @@ export LLMGE_XQC_JAX_CACHE="$XQC_BASE/runs/jax_cache_mjx"
 export LLMGE_MJX_SOLVER="${MJX_SOLVER:-default}"
 mkdir -p "$XQC_RUNS"
 
-# mujoco-mjx (matching the venv's mujoco 3.1.6) and trimesh go in a side
-# directory; the venv itself is left as is. Everything else MJX needs is there.
-MJX_SITE="$XQC_BASE/mjx_site"
-export PYTHONPATH="$MJX_SITE${PYTHONPATH:+:$PYTHONPATH}"
+# mujoco-mjx lives inside the mujoco package (mujoco/mjx), so it must be installed
+# into the same venv as mujoco; a separate --target directory is never searched.
+# --no-deps keeps the venv's jax (0.4.30) as it is. Install once on a login node
+# (compute nodes may have no internet):
+#   source sota/XQC/pace/env.sh
+#   uv pip install --python "$(which python)" --no-deps "mujoco-mjx==$(python -c 'import mujoco; print(mujoco.__version__)')" trimesh
 if ! python -c "import mujoco.mjx" 2>/dev/null; then
-    echo "installing mujoco-mjx into $MJX_SITE"
     MJ=$(python -c "import mujoco; print(mujoco.__version__)")
-    uv pip install --no-deps --target "$MJX_SITE" "mujoco-mjx==$MJ" trimesh \
-        || python -m pip install --no-deps --target "$MJX_SITE" "mujoco-mjx==$MJ" trimesh
-    python -c "import mujoco.mjx" || { echo "mujoco.mjx still does not import" >&2; exit 1; }
+    echo "installing mujoco-mjx==$MJ and trimesh into $(python -c 'import sys; print(sys.prefix)')"
+    uv pip install --python "$(command -v python)" --no-deps "mujoco-mjx==$MJ" trimesh \
+        || python -m pip install --no-deps "mujoco-mjx==$MJ" trimesh
+    if ! python -c "import mujoco.mjx"; then
+        echo "mujoco.mjx still does not import (see the error above; a missing module X can be" \
+             "added with: uv pip install --python \"\$(which python)\" --no-deps X)" >&2
+        exit 1
+    fi
 fi
+echo "mjx ok: mujoco $(python -c 'import mujoco; print(mujoco.__version__)'), jax $(python -c 'import jax; print(jax.__version__)')"
 
 echo "gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader) node=$(hostname) N=$N gene=$SRC steps=$STEPS solver=$LLMGE_MJX_SOLVER"
 nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv -l 30 > "$XQC_RUNS/gpu.csv" &
