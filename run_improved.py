@@ -815,11 +815,12 @@ def cancel_eval_job(gene_id, reason):
         stderr = result.stderr.strip()
         print(f"\t☠ Failed to cancel eval job {job_id} for {gene_id}: {stderr}", flush=True)
 
-def check_and_update_fitness(population, timeout=EVAL_NO_PROGRESS_TIMEOUT_SECONDS, loop_delay=60):
+def check_and_update_fitness(population, timeout=EVAL_NO_PROGRESS_TIMEOUT_SECONDS, loop_delay=60, on_pass=None):
     """ This function submits jobs and then if submitted it checks for four possibilities.
-    
+
     timeout: (int): seconds without an evaluation result before the model job is killed
     loop_delay (int): seconds until iterating over the jobs
+    on_pass: called after every pass over the genes (save_inflight)
     
     for a job four are four possibilities:
         ‣ The Model for Gene: {gene_id} Failed to Run
@@ -896,6 +897,8 @@ def check_and_update_fitness(population, timeout=EVAL_NO_PROGRESS_TIMEOUT_SECOND
                         print(f"\t‣ Still Waiting On: Gene: {gene_id}", flush=True)
                         print_job_info(GLOBAL_DATA[gene_id])
                         all_done = False  # Some jobs are still running
+        if on_pass is not None:
+            on_pass()
         if all_done:
             box_print("Evalutated All Genes", print_bbox_len=60)
             break  # All jobs are done or timed out
@@ -1293,6 +1296,58 @@ def load_checkpoint(folder_name="checkpoints", checkpoint_file=None, global_path
         print(f"Loaded global data from {filepath}")
 
     return population_data, start_gen, global_data
+
+# --- In-flight generation --- #
+# A controller job killed at its wall time used to lose the generation it was in: the next
+# job resumed from the last finished generation and wrote and trained a new one, while the
+# old generation's gene jobs kept running unseen. Once a generation's genes exist (LLM phase
+# done), inflight_gen_<gen>.pkl holds them and the gene bookkeeping (GLOBAL_DATA: statuses,
+# job ids, results), rewritten whenever a gene is submitted or finishes. The next controller
+# resumes that generation: finished genes keep their results, queued and running gene jobs
+# are picked up, and only genes never submitted are submitted. The file is removed once the
+# generation's checkpoint is written. A job killed during the LLM phase still redoes it.
+_INFLIGHT_STATE = None
+
+def inflight_path(folder_name, gen):
+    return os.path.join(folder_name, f'inflight_gen_{gen}.pkl')
+
+def save_inflight(gen, genes, phases, folder_name):
+    """Write generation gen's in-flight state, if a gene changed since the last write."""
+    global _INFLIGHT_STATE
+    state = (gen, tuple((ind[0], tuple(ind.fitness.values), GLOBAL_DATA.get(ind[0], {}).get('status'),
+                         GLOBAL_DATA.get(ind[0], {}).get('results_job')) for ind in genes))
+    if state == _INFLIGHT_STATE:
+        return
+    data = {"gen": gen, "genes": genes, "phases": phases, "GLOBAL_DATA": GLOBAL_DATA,
+            "GLOBAL_DATA_HIST": GLOBAL_DATA_HIST, "GLOBAL_DATA_ANCESTRY": GLOBAL_DATA_ANCESTRY}
+    os.makedirs(folder_name, exist_ok=True)
+    path = inflight_path(folder_name, gen)
+    with open(path + '.tmp', 'wb') as file:
+        pickle.dump(data, file)
+    os.replace(path + '.tmp', path)  # a job killed mid-write keeps the previous file
+    _INFLIGHT_STATE = state
+
+def load_inflight(folder_name, gen):
+    """Generation gen's in-flight state, or None if there is none (or it is unreadable)."""
+    path = inflight_path(folder_name, gen)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'rb') as file:
+            data = pickle.load(file)
+    except Exception as e:
+        print(f"\t☠ Could not read {path} ({e!r}); redoing generation {gen}", flush=True)
+        return None
+    if data.get("gen") != gen:
+        return None
+    print(f"Loaded in-flight generation {gen} from {path}")
+    return data
+
+def clear_inflight(folder_name, gen):
+    global _INFLIGHT_STATE
+    _INFLIGHT_STATE = None
+    if os.path.exists(inflight_path(folder_name, gen)):
+        os.remove(inflight_path(folder_name, gen))
 
 def true_nsga2(pop, k):
     pop = tools.selNSGA2(pop, len(pop)) # 10 diff
@@ -1948,6 +2003,52 @@ def create_population(n, llm_model):
     individual_func = partial(toolbox.individual, llm_model=llm_model)
     return tools.initRepeat(list, individual_func, n)
 
+def finish_generation(gen, offspring, gen_phases, args):
+    """Train generation gen's offspring (LLM phase done), update the archive / population,
+    checkpoint and write the generation's stats. Used by the main loop and by a controller
+    resuming an in-flight generation (inflight_gen_<gen>.pkl)."""
+    global LINKED_GENES
+    save_inflight(gen, offspring, gen_phases, args.checkpoints)
+    check_and_update_fitness(
+        offspring, on_pass=lambda: save_inflight(gen, offspring, gen_phases, args.checkpoints))
+    gen_phases["genes_done"] = time.time()
+    GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
+    updated_genes = set()
+    if USE_MAP_ELITES:
+        # Offspring only survive if they win a cell of the behaviour grid.
+        box_print("UPDATING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
+        updated_genes = update_archive(offspring)
+        if USE_LLM_EMITTERS:
+            record_emitter_history(gen, offspring, updated_genes)
+            decay_curiosity()
+        population[:] = archive_members() or offspring
+    else:
+        # Replace the old population with the offspring
+        population[:] = offspring
+    # Gather all the fitnesses in one list and print the stats
+    print_scores(population, FITNESS_WEIGHTS)
+    hof.update(population)
+    save_checkpoint(gen, folder_name=args.checkpoints, global_path=args.global_path)
+    clear_inflight(args.checkpoints, gen)
+    record_milestones(gen, args.checkpoints)
+    gen_phases["vlm_start"] = time.time()
+    vlm_step(gen, args.checkpoints, archive_members() if USE_MAP_ELITES else population)
+    gen_phases["vlm_done"] = time.time()
+    write_generation_stats(gen, args.checkpoints, offspring, updated_genes, gen_phases)
+    if MOME:
+        write_archive_csv(gen, args.checkpoints)
+    LINKED_GENES = {}
+    # mutate x prompts
+    # mutate_prompts()
+
+    print(f"Finished Generation {gen}")
+    if population:
+        best_ind = tools.selBest(population, 1)[0]
+        print(f"Best Individual: {best_ind}")
+        print(f"Best Fitness: {best_ind.fitness.values}")
+    else:
+        print("No surviving individuals this generation")
+
 # Define the problem
 creator.create("FitnessMulti", base.Fitness, weights=FITNESS_WEIGHTS)  # Adjust weights as needed
 creator.create("Individual", list, fitness=creator.FitnessMulti, file_id=None)
@@ -2015,6 +2116,11 @@ if __name__ == "__main__":
 
     gen_phases = {}  # time.time() marks of the current generation, for generation_stats.csv
     population_data, start_gen, global_data = load_checkpoint(folder_name=args.checkpoints, global_path=args.global_path)
+    # The generation a killed controller was in (LLM phase done), resumed where it stopped.
+    inflight = load_inflight(args.checkpoints, start_gen if population_data else 0)
+    if inflight:
+        # Newer than the global data: it also holds the in-flight genes' jobs and results.
+        global_data = inflight
     if population_data:
         box_print("CHECKPOINT LOADED")
         GLOBAL_DATA = global_data["GLOBAL_DATA"]
@@ -2036,6 +2142,15 @@ if __name__ == "__main__":
                 entry = dict(GLOBAL_DATA.get(ind[0]) or GLOBAL_DATA_HIST.get(ind[0]) or {'start_time': time.time()})
                 entry.update(sub_flag=True, status='completed', fitness=fit)
                 GLOBAL_DATA[ind[0]] = entry
+    elif inflight:
+        # Generation 0 was created and is training: pick its genes up.
+        start_gen = 1
+        box_print("RESUMING GENERATION 0")
+        GLOBAL_DATA = inflight["GLOBAL_DATA"]
+        GLOBAL_DATA_HIST = inflight["GLOBAL_DATA_HIST"]
+        GLOBAL_DATA_ANCESTRY = inflight["GLOBAL_DATA_ANCESTRY"]
+        population, gen_phases = inflight["genes"], inflight["phases"]
+        hof = tools.ParetoFront()
     else:
         # Create an initial population
         start_gen = 1
@@ -2047,11 +2162,18 @@ if __name__ == "__main__":
         gen_phases["llm_done"] = time.time()
         hof = tools.ParetoFront()
 
-    # Evaluate the entire population
-    for ind in population:
-        ind.fitness.values = PLACEHOLDER_FITNESS
-        
-    check_and_update_fitness(population)
+    # Evaluate the entire population. A resumed generation 0 keeps its genes' fitness:
+    # finished ones have their result, the rest are still the placeholder.
+    if population_data or not inflight:
+        for ind in population:
+            ind.fitness.values = PLACEHOLDER_FITNESS
+
+    if population_data:
+        check_and_update_fitness(population)
+    else:
+        save_inflight(0, population, gen_phases, args.checkpoints)
+        check_and_update_fitness(
+            population, on_pass=lambda: save_inflight(0, population, gen_phases, args.checkpoints))
     gen_phases["genes_done"] = time.time()
     seeded_genes = set()
     if USE_MAP_ELITES:
@@ -2068,6 +2190,7 @@ if __name__ == "__main__":
         GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
         hof.update(population)
         save_checkpoint(0, folder_name=args.checkpoints, global_path=args.global_path)
+        clear_inflight(args.checkpoints, 0)
     # Evolution
     if migration_gen != 0:
         # Up to the next migration; islands_wrapper.py then migrates and relaunches.
@@ -2077,6 +2200,13 @@ if __name__ == "__main__":
         generations = itertools.count(start_gen)
     else:
         generations = range(start_gen, num_generations)
+    if population_data and inflight:
+        # Finish the generation the last controller was in, without a new LLM phase
+        # (and without the budget check: its finished genes already count).
+        GEN_COUNT = start_gen
+        box_print(f"RESUMING GENERATION {start_gen}", new_line_end=False)
+        finish_generation(start_gen, inflight["genes"], inflight["phases"], args)
+        generations = itertools.islice(generations, 1, None)
     for gen in generations:
         GEN_COUNT = gen
         if MAX_SUCCESSFUL_EVALS:
@@ -2237,42 +2367,6 @@ if __name__ == "__main__":
             ind.fitness.values = PLACEHOLDER_FITNESS 
 
         GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
-        check_and_update_fitness(offspring)
-        gen_phases["genes_done"] = time.time()
-        GLOBAL_DATA_HIST.update(GLOBAL_DATA.copy())
-        updated_genes = set()
-        if USE_MAP_ELITES:
-            # Offspring only survive if they win a cell of the behaviour grid.
-            box_print("UPDATING MAP-ELITES ARCHIVE", print_bbox_len=60, new_line_end=False)
-            updated_genes = update_archive(offspring)
-            if USE_LLM_EMITTERS:
-                record_emitter_history(gen, offspring, updated_genes)
-                decay_curiosity()
-            population[:] = archive_members() or offspring
-        else:
-            # Replace the old population with the offspring
-            population[:] = offspring
-        # Gather all the fitnesses in one list and print the stats
-        print_scores(population, FITNESS_WEIGHTS)
-        hof.update(population)
-        save_checkpoint(gen, folder_name=args.checkpoints, global_path=args.global_path)
-        record_milestones(gen, args.checkpoints)
-        gen_phases["vlm_start"] = time.time()
-        vlm_step(gen, args.checkpoints, archive_members() if USE_MAP_ELITES else population)
-        gen_phases["vlm_done"] = time.time()
-        write_generation_stats(gen, args.checkpoints, offspring, updated_genes, gen_phases)
-        if MOME:
-            write_archive_csv(gen, args.checkpoints)
-        LINKED_GENES = {}
-        # mutate x prompts
-        # mutate_prompts()
+        finish_generation(gen, offspring, gen_phases, args)
 
-        print(f"Finished Generation {gen}")
-        if population:
-            best_ind = tools.selBest(population, 1)[0]
-            print(f"Best Individual: {best_ind}")
-            print(f"Best Fitness: {best_ind.fitness.values}")
-        else:
-            print("No surviving individuals this generation")
-        
     print("-- End of Era --")

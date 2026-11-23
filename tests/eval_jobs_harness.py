@@ -5,8 +5,8 @@
 Fake sbatch runs each job script in the background with bash; fake genes write a
 results CSV and print "Job Done" (or crash). Checks: packing 2 genes per job,
 a crashing gene inside a pack, one gene per job (old path), duplicate genes inside a
-packed batch (Alex's duplicate reuse), a parent copy after a failed variation, and
-gen-0 checkpoint resume.
+packed batch (Alex's duplicate reuse), a parent copy after a failed variation,
+gen-0 checkpoint resume, and resuming a killed controller's in-flight generation.
 """
 import os
 import sys
@@ -126,6 +126,46 @@ rim.population, rim.hof = make_population(["ffffff"]), rim.tools.ParetoFront()
 rim.save_checkpoint(0, folder_name=ck, global_path=gp)
 pop_data, start_gen, _ = rim.load_checkpoint(folder_name=ck, global_path=gp)
 expect(pop_data is not None and start_gen == 1, f"gen-0 checkpoint resumes at gen 1 (got {start_gen})")
+
+# 6) a controller killed while its generation trains: the next one resumes the generation from
+#    inflight_gen_1.pkl and picks up the running jobs and finished results without resubmitting
+class Killed(Exception):
+    pass
+
+rim.GENES_PER_JOB = 2
+names = ["ii", "jjj", "kkkk", "crash3"]
+pop = make_population(names)
+phases = {"start": time.time()}
+rim.save_inflight(1, pop, phases, ck)
+expect(rim.load_inflight(ck, 1) is not None, "in-flight state written before any gene is submitted")
+
+def kill_after_first_pass():
+    rim.save_inflight(1, pop, phases, ck)
+    raise Killed
+
+try:
+    rim.check_and_update_fitness(pop, timeout=120, loop_delay=2, on_pass=kill_after_first_pass)
+except Killed:
+    pass
+jobs_before = {n: rim.GLOBAL_DATA[n]["results_job"] for n in names}
+expect(all(j and not str(j).startswith("duplicate") for j in jobs_before.values()),
+       "first controller submitted every gene before it was killed")
+
+# The next controller: a fresh process, so only what the file holds.
+time.sleep(1)
+data = rim.load_inflight(ck, 1)
+rim.GLOBAL_DATA, rim.GLOBAL_DATA_HIST = data["GLOBAL_DATA"], data["GLOBAL_DATA_HIST"]
+rim.GLOBAL_DATA_ANCESTRY = data["GLOBAL_DATA_ANCESTRY"]
+resumed = data["genes"]
+expect([ind[0] for ind in resumed] == names and data["phases"] == phases, "in-flight genes and phases restored")
+rim.check_and_update_fitness(resumed, timeout=120, loop_delay=2)
+fits = {ind[0]: tuple(ind.fitness.values) for ind in resumed}
+expect({n: rim.GLOBAL_DATA[n]["results_job"] for n in names} == jobs_before,
+       "resumed controller picked up the same jobs (nothing resubmitted)")
+expect(fits["ii"][0] == 200 and fits["jjj"][0] == 300 and fits["kkkk"][0] == 400
+       and fits["crash3"] == tuple(rim.INVALID_FITNESS_MAX), "resumed genes got their own results")
+rim.clear_inflight(ck, 1)
+expect(rim.load_inflight(ck, 1) is None, "in-flight state removed once the generation is checkpointed")
 
 shutil.rmtree(work, ignore_errors=True)
 print("\nALL PASS" if ok else "\nSOME FAILED")

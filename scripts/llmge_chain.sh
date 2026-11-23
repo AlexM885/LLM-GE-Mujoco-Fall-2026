@@ -6,8 +6,9 @@
 #
 #   scripts/llmge_chain.sh RUN SERVER_JOBS CONTROLLER_JOBS [CONTROLLER_TIME]
 #
-# CONTROLLER_TIME defaults to 18:00:00 (the ice-cpu limit): a controller killed at
-# its limit loses the generation it was in, so long controller jobs waste less.
+# CONTROLLER_TIME defaults to 18:00:00 (the ice-cpu limit). A controller killed at its
+# limit loses only an unfinished LLM phase: the next one resumes a generation whose genes
+# were written (inflight_gen_<gen>.pkl), picking up its queued, running and finished genes.
 # The current environment goes to every job (sbatch --export=ALL), e.g.
 #   LLMGE_ALGO=xqc LLMGE_ARCHIVE=mome LLMGE_POP_SIZE=16 LLMGE_NUM_GENERATIONS=200 \
 #   LLMGE_MIGRATION_GEN=0 LLMGE_GENE_TIME=2:00:00 scripts/llmge_chain.sh xqc_mome_run1 21 10
