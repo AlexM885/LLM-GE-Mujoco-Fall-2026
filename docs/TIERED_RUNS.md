@@ -23,7 +23,7 @@ All of these are set inside `scripts/tiered_run.sh`. You never type them yoursel
 | Archive | 32×32 MAP-Elites (left/right foot contact) | midterm config |
 | Budget | 10 generations' worth of steps (288M), compared at equal steps | fair compute for every tier |
 | Learning curve | every 25k steps (same as the midterm runs) | lets us redo the Kendall tau check |
-| Gene jobs | 2 genes per GPU job on H100/H200, 3 h wall time, 3.5 h no-progress timeout, 48 h max queue wait | timing + smoke tests below |
+| Gene jobs | 2 genes per GPU job on any GPU, 3 h wall time, 3.5 h no-progress timeout, 48 h max queue wait | timing + smoke tests below |
 | Speed-ups | GPU replay buffer, compile cache, duplicate reuse, queue-aware timeouts, gen-0 checkpoint, 2 genes per job | change speed, not results |
 | Training seeds per repeat | repeat 1: 0–2, repeat 2: 1000–1002, repeat 3: 2000–2002 | repeats differ in training luck too |
 
@@ -50,7 +50,8 @@ only about 2 at a time.
 
 **Smoke test (Nov 15, `control_r99`, any GPU, 3 h):** Slurm put every gene job on a V100, RTX 6000
 or A40. A packed pair took 1.1–3 h there (median 137 min) and 4 of 23 jobs hit the 3 h limit, so
-generation 0 took 7.8 h. Gene jobs now ask for **H100/H200 only** (every tier the same). Three nodes
+generation 0 took 7.8 h. Gene jobs then asked for H100/H200 only; they now take **any GPU** again
+(every tier the same). Three nodes
 that fail JAX CUDA start-up are excluded (`BAD_NODES` in the script). The `sliding` tier gets the same
 gene wall time, timeout and bad-node list.
 
